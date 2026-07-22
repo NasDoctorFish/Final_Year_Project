@@ -1,0 +1,23 @@
+# Core
+androguard>=4.1.0        # APK decompilation + manifest parsing
+numpy>=1.26              # statistics (robust-z outlier detection)
+pyyaml>=6.0              # config
+
+# AI layer (optional at runtime; findings work without it)
+google-genai>=1.0        # Gemini API for explanation/mitigation
+pydantic>=2.6            # structured AI output validation
+
+# Desktop GUI (optional; core + CLI run without it)
+PySide6>=6.6             # native desktop app: python -m bioauthguard gui
+
+# Dashboard + reporting
+streamlit>=1.40          # dashboard UI
+jinja2>=3.1              # HTML report templating
+weasyprint>=63           # HTML -> PDF export
+
+# Build-only: package a standalone Windows exe (see docs/BUILD-EXE.md)
+# pyinstaller>=6.3
+
+# Device control is via the `adb` CLI on PATH (no Python dependency required).
+# uiautomator2 is optional and only needed for UI-driven scenario navigation:
+# uiautomator2>=3.2

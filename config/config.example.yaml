@@ -1,0 +1,31 @@
+# Copy to config/config.yaml and edit. config.yaml is gitignored.
+
+device:
+  serial: null            # specific adb serial, or null to auto-select the only device
+  adb_path: adb           # path to the adb binary
+
+runtime:
+  # Number of trials per scenario for the statistical baseline.
+  trials_per_scenario: 30
+  # Wait (seconds) for a screen to settle before observing.
+  settle_seconds: 2
+
+ai:
+  enabled: true
+  # The AI explanation layer uses the Gemini API (Google).
+  # Set your key in GEMINI_API_KEY (or GOOGLE_API_KEY).
+  # Model id. Leave null to use the default (gemini-flash-latest); the backend
+  # auto-discovers an available model if that one is ever retired.
+  model: null
+  # Redact secrets from all content before it is sent to the model.
+  redact_before_send: true
+  # Effort hint for the explanation/mitigation generation.
+  effort: medium
+  # Path to the grounding knowledge base.
+  knowledge_base: config/knowledge_base/android_biometric_kb.md
+
+storage:
+  database: bioauthguard.sqlite
+
+report:
+  output_dir: reports
