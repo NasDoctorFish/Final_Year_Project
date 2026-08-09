@@ -1,7 +1,7 @@
 # Design Decisions Log
 
 This log captures the reasoning trail from the design conversation that produced
-BioAuthGuard, so the "why" travels with the code. Newest decisions are the ones the
+BioAudit, so the "why" travels with the code. Newest decisions are the ones the
 scaffold implements; earlier rows record options considered and rejected.
 
 ## Decision trail

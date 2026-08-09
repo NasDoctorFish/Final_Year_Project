@@ -1,6 +1,6 @@
-# Building a standalone `BioAuthGuard.exe`
+# Building a standalone `BioAudit.exe`
 
-BioAuthGuard ships a native desktop GUI (PySide6) and can be packaged into a
+BioAudit ships a native desktop GUI (PySide6) and can be packaged into a
 single Windows executable with PyInstaller. The same exe doubles as the CLI.
 
 ## What the exe does and does not contain
@@ -39,22 +39,22 @@ single Windows executable with PyInstaller. The same exe doubles as the CLI.
    ```
    If that import fails, the exe will build but PDF export will silently fall back
    to HTML (the report generator already degrades gracefully). If you don't need
-   PDF, you can drop `weasyprint` from the `collect_all` loop in `BioAuthGuard.spec`
+   PDF, you can drop `weasyprint` from the `collect_all` loop in `BioAudit.spec`
    and remove the native-lib step entirely.
 
 ## Build
 
 ```
-pyinstaller BioAuthGuard.spec
+pyinstaller BioAudit.spec
 ```
 
-The result is `dist/BioAuthGuard.exe` (expect 150–300 MB — androguard and
+The result is `dist/BioAudit.exe` (expect 150–300 MB — androguard and
 PySide6 are large). Double-clicking it launches the GUI; from a terminal it also
 behaves as the CLI:
 
 ```
-BioAuthGuard.exe scan-apk app.apk
-BioAuthGuard.exe assess --package com.example.app --apk app.apk --i-am-authorized
+BioAudit.exe scan-apk app.apk
+BioAudit.exe assess --package com.example.app --apk app.apk --i-am-authorized
 ```
 
 ## Notes

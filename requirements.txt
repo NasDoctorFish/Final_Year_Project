@@ -8,7 +8,7 @@ google-genai>=1.0        # Gemini API for explanation/mitigation
 pydantic>=2.6            # structured AI output validation
 
 # Desktop GUI (optional; core + CLI run without it)
-PySide6>=6.6             # native desktop app: python -m bioauthguard gui
+PySide6>=6.6             # native desktop app: python -m bioaudit gui
 
 # Dashboard + reporting
 streamlit>=1.40          # dashboard UI

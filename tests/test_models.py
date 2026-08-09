@@ -1,8 +1,8 @@
 """Smoke tests for the deterministic core (no device or network needed)."""
 
-from bioauthguard.models import Finding, Severity, TestRun
-from bioauthguard.engine import severity
-from bioauthguard.ai.redaction import redact
+from bioaudit.models import Finding, Severity, TestRun
+from bioaudit.engine import severity
+from bioaudit.ai.redaction import redact
 
 
 def test_severity_ordering():

@@ -1,4 +1,4 @@
-# BioAuthGuard — Design Report
+# BioAudit — Design Report
 
 **A pure-Python security testing tool for Android biometric authentication (Mode B).**
 It inspects an app you own or are authorized to test — an installed app on a real
@@ -17,7 +17,7 @@ subtle: trusting the `onAuthenticationSucceeded` boolean instead of unlocking a
 biometric-bound key; keys not hardware-backed or not enrolment-bound; weak fallback;
 and — the one code review misses most — the auth check being **decorative** while
 the protected functionality is reachable through an exposed component. Existing
-tools do functional QA; BioAuthGuard does security analysis with remediation, for
+tools do functional QA; BioAudit does security analysis with remediation, for
 developers without security expertise.
 
 ## 2. Scope decisions (final)

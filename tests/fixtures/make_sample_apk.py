@@ -1,4 +1,4 @@
-"""Forge a tiny but *real* APK for exercising BioAuthGuard's static detectors.
+"""Forge a tiny but *real* APK for exercising BioAudit's static detectors.
 
 There is no Android SDK on the dev box, so this hand-encodes the two things the
 detectors actually parse:
@@ -14,7 +14,7 @@ The output is a plain ZIP (APK). androguard parses the manifest and decompiles t
 dex without needing a signature. Run:
 
     python tests/fixtures/make_sample_apk.py            # writes sample-vuln-app.apk
-    python -m bioauthguard scan-apk sample-vuln-app.apk
+    python -m bioaudit scan-apk sample-vuln-app.apk
 
 This is a synthetic app we generate ourselves — nothing proprietary, nothing you
 need authorization to inspect.
@@ -357,7 +357,7 @@ def main() -> int:
     out = sys.argv[1] if len(sys.argv) > 1 else "sample-vuln-app.apk"
     write_apk(out)
     print(f"Wrote {out} ({os.path.getsize(out)} bytes)")
-    print("Try:  python -m bioauthguard scan-apk", out)
+    print("Try:  python -m bioaudit scan-apk", out)
     return 0
 
 

@@ -1,0 +1,76 @@
+rules_version = '2';
+
+// Firestore security rules.
+//
+// This API uses the Admin SDK, which bypasses these rules entirely, so every permission
+// check that matters is enforced in Express (see src/middleware/auth.js). These rules are
+// the second line of defence: if anything ever talks to Firestore directly with a client
+// SDK, or if a database URL leaks, the default answer is no.
+//
+// Deploy with: firebase deploy --only firestore:rules
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    // Tier and role are carried as custom claims, set by the API when they change.
+    function isAdminOf(orgId) {
+      return signedIn()
+        && request.auth.token.role == 'admin'
+        && request.auth.token.organisationId == orgId;
+    }
+
+    // A user may read their own record. Writes go through the API only, so that tier and
+    // role cannot be raised by editing the document directly, which would otherwise be a
+    // straightforward way to grant yourself premium or admin.
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if false;
+    }
+
+    // Members may read their organisation. Only the API changes it.
+    match /organisations/{orgId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.memberIds;
+      allow write: if false;
+    }
+
+    // Invitations hold a token hash, so they are never client readable. Accepting one
+    // goes through the API, which verifies the token and updates several documents in a
+    // single transaction.
+    match /invitations/{invitationId} {
+      allow read, write: if false;
+    }
+
+    // A scan belongs to the person who ran it. Admin access to a member's scans is
+    // granted by the API instead, because it also writes an audit entry for the read.
+    match /scans/{scanId} {
+      allow read: if isOwner(resource.data.userId);
+      allow write: if false;
+    }
+
+    // Flags are an admin workflow and are only reachable through the API.
+    match /flags/{flagId} {
+      allow read: if isAdminOf(resource.data.organisationId);
+      allow write: if false;
+    }
+
+    // The audit log is append-only, and only the server appends to it. Admins read it
+    // through the API so the query can be scoped to their own organisation.
+    match /auditLog/{entryId} {
+      allow read, write: if false;
+    }
+
+    // Anything not named above is denied, so a new collection is closed until rules for
+    // it are written on purpose.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

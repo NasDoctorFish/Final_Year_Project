@@ -25,7 +25,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 MIN_SDK = "28"          # BiometricPrompt (framework) is API 28+
 TARGET_SDK = "34"
-PKG = "com.bioauthguard.vulndemo"
+PKG = "com.bioaudit.vulndemo"
 
 
 def find_sdk() -> Path:
@@ -144,7 +144,7 @@ def main() -> int:
         run(["keytool", "-genkeypair", "-keystore", str(keystore),
              "-storepass", "android", "-keypass", "android",
              "-alias", "androiddebugkey", "-keyalg", "RSA", "-keysize", "2048",
-             "-validity", "10000", "-dname", "CN=BioAuthGuard Debug"])
+             "-validity", "10000", "-dname", "CN=BioAudit Debug"])
         signed = build / "vulndemo-signed.apk"
         run([apksigner, "sign", "--ks", str(keystore),
              "--ks-pass", "pass:android", "--key-pass", "pass:android",
@@ -159,11 +159,11 @@ def main() -> int:
 
         if install:
             sys.path.insert(0, str(HERE.parent))
-            from bioauthguard.adb import resolve_adb  # reuse the tool's adb finder
+            from bioaudit.adb import resolve_adb  # reuse the tool's adb finder
             adb = resolve_adb("adb")
             print(f"\nInstalling with {adb} …")
             run([adb, "install", "-r", str(out_apk)])
-            print("Installed. Launch 'BioAuthGuard VulnDemo' on the phone once, then assess:")
+            print("Installed. Launch 'BioAudit VulnDemo' on the phone once, then assess:")
         print(f"\n  package: {PKG}")
         print(f"  apk:     {out_apk}")
         return 0

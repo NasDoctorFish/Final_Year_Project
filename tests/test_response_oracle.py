@@ -4,9 +4,9 @@ A tiny fake Adb scripts `content query` responses so the pure detection logic ca
 be exercised deterministically, mirroring how the real detector reads adb output.
 """
 
-from bioauthguard.adb import AdbResult
-from bioauthguard.runtime import response_oracle
-from bioauthguard.static_analysis.manifest import Component, ManifestInfo
+from bioaudit.adb import AdbResult
+from bioaudit.runtime import response_oracle
+from bioaudit.static_analysis.manifest import Component, ManifestInfo
 
 
 class FakeAdb:

@@ -1,8 +1,8 @@
 """Frozen-exe entry point.
 
-Run with no arguments (e.g. double-clicking BioAuthGuard.exe) launches the
+Run with no arguments (e.g. double-clicking BioAudit.exe) launches the
 desktop GUI. Any arguments are forwarded to the normal CLI, so the same exe also
-works as `BioAuthGuard.exe scan-apk app.apk`, `... assess --package ...`, etc.
+works as `BioAudit.exe scan-apk app.apk`, `... assess --package ...`, etc.
 """
 
 import os
@@ -31,7 +31,7 @@ def _ensure_std_streams() -> None:
 
 _ensure_std_streams()
 
-from bioauthguard.cli import main  # noqa: E402 - must follow _ensure_std_streams()
+from bioaudit.cli import main  # noqa: E402 - must follow _ensure_std_streams()
 
 if __name__ == "__main__":
     argv = sys.argv[1:] or ["gui"]

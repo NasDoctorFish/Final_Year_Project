@@ -1,6 +1,6 @@
-# BioAuthGuard
+# BioAudit
 
-**A security testing tool for Android biometric authentication.** BioAuthGuard is a
+**A security testing tool for Android biometric authentication.** BioAudit is a
 pure-Python tool that inspects an Android app (installed on a real device, or an
 APK on disk) and reports whether its biometric authentication is *secure* — not
 just whether it *works*. It combines static APK analysis with runtime testing over
@@ -32,7 +32,8 @@ a **standalone Windows `.exe`** — all driving the same detection engine.
 | Statistical baseline + outlier detection (no ML) | `analysis/statistics.py` | — |
 | AI explanation + mitigation (grounded, redacted) | `ai/` | — |
 | Severity ranking + recommendation engine | `engine/` | — |
-| Desktop GUI (scan / assess / history) | `gui/` | — |
+| Desktop GUI (scan / assess / history / accounts) | `gui/` | — |
+| Optional backend: accounts, shared history, team oversight | `backend/`, `api/` | — |
 | Dashboard + test history | `dashboard/`, `storage/` | — |
 | HTML/PDF report export | `report/` | — |
 
@@ -64,16 +65,16 @@ needs `PySide6`.
 
 ```bash
 # Static analysis of an APK (no device needed)
-python -m bioauthguard scan-apk path/to/app.apk
+python -m bioaudit scan-apk path/to/app.apk
 
 # Full assessment against an installed app on a connected device
-python -m bioauthguard assess --package com.example.app --i-am-authorized
+python -m bioaudit assess --package com.example.app --i-am-authorized
 
 # Launch the desktop app (scan / assess / browse history in one window)
-python -m bioauthguard gui
+python -m bioaudit gui
 
 # Launch the Streamlit dashboard
-python -m bioauthguard dashboard
+python -m bioaudit dashboard
 ```
 
 The `--i-am-authorized` flag is a required authorization gate for any runtime
@@ -87,7 +88,7 @@ and scan it — a quick way to see every static detector fire end to end:
 
 ```bash
 python tests/fixtures/make_sample_apk.py         # writes sample-vuln-app.apk
-python -m bioauthguard scan-apk sample-vuln-app.apk
+python -m bioaudit scan-apk sample-vuln-app.apk
 ```
 
 Expect four findings: a debuggable app (High), `allowBackup` enabled (Medium), a
@@ -103,12 +104,12 @@ detector, including the auth-state / response oracle side channel:
 
 ```bash
 python sample-app/build.py --install    # builds + installs VulnDemo on a connected device
-python -m bioauthguard assess --package com.bioauthguard.vulndemo --apk sample-app/dist/vulndemo.apk --i-am-authorized
+python -m bioaudit assess --package com.bioaudit.vulndemo --apk sample-app/dist/vulndemo.apk --i-am-authorized
 ```
 
 Against VulnDemo, `assess` fires several findings including the **auth-state /
 response oracle**: VulnDemo ships an exported, unguarded `ContentProvider` that
-answers a valid identifier differently from an invalid one, and BioAuthGuard
+answers a valid identifier differently from an invalid one, and BioAudit
 detects that distinguishable response over adb — see the next section.
 
 ### Auth-state / response oracle (the Mode-B side channel)
@@ -130,6 +131,30 @@ class, applied to Android's IPC surface. Unlike timing, this is **deterministic*
 root, no fingerprint**, and never emits a "no leak" verdict — it stays silent when
 responses are indistinguishable.
 
+### Optional: accounts and shared history
+
+Everything above works with no server. If you want results saved to an account, a history
+that follows you between machines, or a team where an admin can oversee members, there is
+a REST backend in `backend/` (Express, Firestore, Firebase Authentication).
+
+```bash
+cd backend
+npm install
+cp .env.example .env      # fill in your Firebase keys
+npm run dev
+```
+
+Then sign in from the desktop app's **Account** menu. Each finished run gets a "Save this
+run to my account" tick box, and the History tab gains a **Show account history** button.
+
+Two things to know. **A failed upload never loses a scan**: the findings still render and
+the report is still written, with a banner explaining what did not save. And **"keep me
+signed in" is off by default**, because signing in returns a long-lived refresh token and
+writing that to disk is a trade-off worth making visible rather than quietly convenient.
+
+See [backend/README.md](backend/README.md) for the API reference, the data model, and how
+to run its two test suites against the Firebase emulators.
+
 ### Build a standalone `.exe`
 
 Package the GUI + scanner + reporting into a single Windows executable with
@@ -138,7 +163,7 @@ CLI. See [docs/BUILD-EXE.md](docs/BUILD-EXE.md) for prerequisites and caveats.
 
 ```bash
 pip install pyinstaller
-pyinstaller BioAuthGuard.spec        # -> dist/BioAuthGuard.exe
+pyinstaller BioAudit.spec        # -> dist/BioAudit.exe
 ```
 
 ---
@@ -146,12 +171,13 @@ pyinstaller BioAuthGuard.spec        # -> dist/BioAuthGuard.exe
 ## Project layout
 
 ```
-bioauthguard/
+bioaudit/
   cli.py            entry point / command dispatch
   core.py           shared assessment orchestration (used by the CLI and GUI)
   config.py         config loading
   models.py         Finding / Severity / TestRun data models
   adb.py            ADB wrapper (no root)
+  api/              client for the optional backend (standard library only)
   static_analysis/  APK + manifest inspection (androguard)
   runtime/          IPC oracle, response oracle (side channel), scenarios, observers
   analysis/         error-oracle, lockout, statistics (robust-z outliers)
@@ -159,10 +185,11 @@ bioauthguard/
   engine/           severity model + recommendation orchestration
   report/           HTML/PDF export
   storage/          SQLite test history
-  gui/              PySide6 desktop app
+  gui/              PySide6 desktop app (app.py, signin.py)
   dashboard/        Streamlit UI
 launcher.py         frozen-exe entry point (GUI by default, CLI with args)
-BioAuthGuard.spec   PyInstaller build spec
+BioAudit.spec   PyInstaller build spec
+backend/            optional Express + Firestore API (accounts, history, teams)
 config/             example config + AI knowledge base
 docs/               full design report + BUILD-EXE.md
 sample-app/         VulnDemo — deliberately-insecure demo app + Gradle-free builder
@@ -174,6 +201,6 @@ tests/
 
 ## Ethics
 
-BioAuthGuard performs no exploitation beyond what is needed to *demonstrate* a
+BioAudit performs no exploitation beyond what is needed to *demonstrate* a
 finding, and every runtime flow is gated behind an explicit authorization
 confirmation. Only test applications you own or are explicitly authorized to test.

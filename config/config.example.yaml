@@ -24,8 +24,19 @@ ai:
   # Path to the grounding knowledge base.
   knowledge_base: config/knowledge_base/android_biometric_kb.md
 
+api:
+  # Optional backend for accounts, shared history, and server-side AI explanations.
+  # Off by default: the scanner, the CLI, and the report writer all work with no server,
+  # and nothing here is needed to find a vulnerability. Signing in from the desktop app's
+  # Account menu turns it on for that session.
+  enabled: false
+  base_url: http://127.0.0.1:4000/api
+  # Upload each finished run automatically once signed in. When false, results stay on
+  # this machine unless you tick the box on the scan tab.
+  auto_sync: true
+
 storage:
-  database: bioauthguard.sqlite
+  database: bioaudit.sqlite
 
 report:
   output_dir: reports

@@ -30,7 +30,7 @@ def apk(tmp_path_factory) -> str:
 
 
 def test_manifest_findings(apk):
-    from bioauthguard.static_analysis import manifest
+    from bioaudit.static_analysis import manifest
 
     info = manifest.parse_apk(apk)
     assert info.package == "com.example.vuln"
@@ -44,7 +44,7 @@ def test_manifest_findings(apk):
 
 
 def test_decompiled_pattern_findings(apk):
-    from bioauthguard.static_analysis import apk_analyzer
+    from bioaudit.static_analysis import apk_analyzer
 
     categories = {f.category for f in apk_analyzer.analyze_apk(apk)}
     # onAuthenticationSucceeded present, CryptoObject absent -> the headline pattern.
@@ -52,9 +52,9 @@ def test_decompiled_pattern_findings(apk):
 
 
 def test_full_scan_ranks_and_dials_back(apk):
-    from bioauthguard.config import Config
-    from bioauthguard.engine import recommendations
-    from bioauthguard import core
+    from bioaudit.config import Config
+    from bioaudit.engine import recommendations
+    from bioaudit import core
 
     run = core.build_scan_apk(apk, Config())
     run.findings = recommendations.process(run.findings, explainer=None)
