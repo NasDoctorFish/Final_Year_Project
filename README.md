@@ -11,8 +11,21 @@ Use it three ways: a **command-line tool**, a **native desktop app** (PySide6), 
 a **standalone Windows `.exe`** — all driving the same detection engine.
 
 > **Scope:** Mode B (black-box) only. Point it at an app you **own or are
-> authorized to test**. No root required, no app rebuild, no source needed. See
-> `docs/design-report.md` for the full design rationale.
+> authorized to test**. No root required, no app rebuild, no source needed.
+>
+> **An account is required.** BioAudit keeps no local copy of a scan — every result is
+> uploaded to your account on the backend in `backend/`, which is what lets your history
+> follow you between machines and gives a team's admin oversight. See
+> [Accounts and shared history](#accounts-and-shared-history) below.
+
+### Guides
+
+| Guide | For |
+|---|---|
+| [docs/USER-GUIDE.md](docs/USER-GUIDE.md) | Using the app: signing in, scanning, reading results, teams |
+| [docs/FRONTEND-GUIDE.md](docs/FRONTEND-GUIDE.md) | Changing the Python side (GUI, CLI, detectors, building the exe) |
+| [docs/BACKEND-GUIDE.md](docs/BACKEND-GUIDE.md) | Changing the Node/Express API (endpoints, Firestore, deployment) |
+| [backend/README.md](backend/README.md) | API reference: every endpoint, the data model, the auth flow |
 
 ---
 
@@ -30,11 +43,11 @@ a **standalone Windows `.exe`** — all driving the same detection engine.
 | Behavioural error-oracle | `analysis/error_oracle.py` | M3 |
 | Lockout / attempt-counter oracle | `analysis/lockout.py` | M3 |
 | Statistical baseline + outlier detection (no ML) | `analysis/statistics.py` | — |
-| AI explanation + mitigation (grounded, redacted) | `ai/` | — |
+| AI explanation + mitigation (grounded, redacted) — server-side only | `backend/src/services/gemini.service.js` | — |
 | Severity ranking + recommendation engine | `engine/` | — |
 | Desktop GUI (scan / assess / history / accounts) | `gui/` | — |
-| Optional backend: accounts, shared history, team oversight | `backend/`, `api/` | — |
-| Dashboard + test history | `dashboard/`, `storage/` | — |
+| Backend: accounts, history, team oversight (required — see below) | `backend/`, `api/` | — |
+| Dashboard: browse an account's history | `dashboard/` | — |
 | HTML/PDF report export | `report/` | — |
 
 **Detection is deterministic.** The AI layer never decides whether a vulnerability
@@ -48,32 +61,41 @@ confirmed.
 - Python 3.10+
 - `adb` on your PATH ([platform-tools](https://developer.android.com/tools/releases/platform-tools)) — only for the runtime `assess` command
 - A **real physical device** (a Google Pixel on Android 12+ is the reference) with USB debugging on — only for `assess`
-- A `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) for the AI layer — optional; findings still work without it
 
 ```bash
 pip install -r requirements.txt
 ```
 
-The deterministic core degrades gracefully: heavy dependencies (androguard,
-google-genai, PySide6, weasyprint, …) import lazily, so the rule-based engine runs
-even with none of them installed. `scan-apk` needs androguard; the desktop app
-needs `PySide6`.
+The deterministic core degrades gracefully: heavy dependencies (androguard, PySide6,
+weasyprint, …) import lazily, so the rule-based engine runs even with none of them
+installed. `scan-apk` needs androguard; the desktop app needs `PySide6`. Nothing here
+needs a Gemini key — AI explanation runs entirely on the backend (see
+[Accounts and shared history](#accounts-and-shared-history)), not on your machine.
 
 ---
 
 ## Usage
 
+Sign in once before scanning — see [Accounts and shared history](#accounts-and-shared-history)
+for how to get the backend running and create an account. The CLI remembers the session
+on disk, same as the GUI's "keep me signed in":
+
 ```bash
+python -m bioaudit login          # or: register --email ... --organisation "Team Name"
+
 # Static analysis of an APK (no device needed)
 python -m bioaudit scan-apk path/to/app.apk
 
 # Full assessment against an installed app on a connected device
 python -m bioaudit assess --package com.example.app --i-am-authorized
 
+# Ask the server for a plain-language explanation and fix (prints the scan id above)
+python -m bioaudit explain <scan-id>
+
 # Launch the desktop app (scan / assess / browse history in one window)
 python -m bioaudit gui
 
-# Launch the Streamlit dashboard
+# Launch the Streamlit dashboard (reads whichever account you last logged in as)
 python -m bioaudit dashboard
 ```
 
@@ -116,7 +138,7 @@ detects that distinguishable response over adb — see the next section.
 
 A timing side channel is impractical black-box: a Python host measuring over ADB
 buries a microsecond signal in millisecond USB/OS noise, and Mode B has no
-on-device stopwatch (see `docs/DESIGN-DECISIONS.md`). The *practical* Mode-B side
+on-device stopwatch. The *practical* Mode-B side
 channel is an **oracle attack** — and an oracle attack **is** a side channel: the
 app's observable *response* leaks secret auth state.
 
@@ -131,11 +153,12 @@ class, applied to Android's IPC surface. Unlike timing, this is **deterministic*
 root, no fingerprint**, and never emits a "no leak" verdict — it stays silent when
 responses are indistinguishable.
 
-### Optional: accounts and shared history
+### Accounts and shared history
 
-Everything above works with no server. If you want results saved to an account, a history
-that follows you between machines, or a team where an admin can oversee members, there is
-a REST backend in `backend/` (Express, Firestore, Firebase Authentication).
+BioAudit keeps no local copy of a scan. Every finished run is uploaded to an account on
+the REST backend in `backend/` (Express, Firestore, Firebase Authentication) — that is
+what lets your history follow you between machines and gives a team's admin oversight, and
+it is why an account is required rather than optional.
 
 ```bash
 cd backend
@@ -144,13 +167,25 @@ cp .env.example .env      # fill in your Firebase keys
 npm run dev
 ```
 
-Then sign in from the desktop app's **Account** menu. Each finished run gets a "Save this
-run to my account" tick box, and the History tab gains a **Show account history** button.
+Then sign in:
 
-Two things to know. **A failed upload never loses a scan**: the findings still render and
-the report is still written, with a banner explaining what did not save. And **"keep me
-signed in" is off by default**, because signing in returns a long-lived refresh token and
-writing that to disk is a trade-off worth making visible rather than quietly convenient.
+- **Desktop app**: a welcome screen appears on launch — create an account, join one from a
+  team invite, or sign in. There is no guest mode; closing the screen without signing in
+  closes the app, since there would be nowhere to put a result.
+- **CLI**: `python -m bioaudit login` (or `register`). `scan-apk` and `assess` refuse to
+  run without a session. `python -m bioaudit whoami` shows who is currently signed in;
+  `logout` ends the session.
+- **Dashboard**: reads whichever account the CLI last signed in as; run `bioaudit login`
+  first if it says nobody is signed in.
+
+Two things to know. **A failed upload does not throw the scan away**: the findings still
+render (the GUI keeps a "Retry saving" button for the run in memory; the CLI prints them to
+the terminal and exits non-zero, so rerun the command once you are back online) and the
+report is still written to disk — but until an upload succeeds the run exists nowhere else,
+since there is no local fallback. And **"keep me signed in" is off by default in the GUI**
+(the CLI's `login`/`register` persist by default, since that is the point of running them),
+because signing in returns a long-lived refresh token and writing that to disk is a
+trade-off worth making visible rather than quietly convenient.
 
 See [backend/README.md](backend/README.md) for the API reference, the data model, and how
 to run its two test suites against the Firebase emulators.
@@ -159,7 +194,7 @@ to run its two test suites against the Firebase emulators.
 
 Package the GUI + scanner + reporting into a single Windows executable with
 PyInstaller. Double-clicking it opens the GUI; from a terminal it behaves as the
-CLI. See [docs/BUILD-EXE.md](docs/BUILD-EXE.md) for prerequisites and caveats.
+CLI. See [docs/FRONTEND-GUIDE.md](docs/FRONTEND-GUIDE.md) for prerequisites and caveats.
 
 ```bash
 pip install pyinstaller
@@ -177,21 +212,20 @@ bioaudit/
   config.py         config loading
   models.py         Finding / Severity / TestRun data models
   adb.py            ADB wrapper (no root)
-  api/              client for the optional backend (standard library only)
+  api/              client for the backend (standard library only)
+  session.py        saved-session file, shared by the CLI, GUI, and dashboard
   static_analysis/  APK + manifest inspection (androguard)
   runtime/          IPC oracle, response oracle (side channel), scenarios, observers
   analysis/         error-oracle, lockout, statistics (robust-z outliers)
-  ai/               grounded LLM explanation + secret redaction
   engine/           severity model + recommendation orchestration
   report/           HTML/PDF export
-  storage/          SQLite test history
-  gui/              PySide6 desktop app (app.py, signin.py)
+  gui/              PySide6 desktop app (app.py, signin.py — sign-in and welcome gate)
   dashboard/        Streamlit UI
 launcher.py         frozen-exe entry point (GUI by default, CLI with args)
 BioAudit.spec   PyInstaller build spec
-backend/            optional Express + Firestore API (accounts, history, teams)
-config/             example config + AI knowledge base
-docs/               full design report + BUILD-EXE.md
+backend/            Express + Firestore API (accounts, history, teams, AI explanation) — required
+config/             example config
+docs/               user guide + front-end and back-end editing guides
 sample-app/         VulnDemo — deliberately-insecure demo app + Gradle-free builder
 tests/
   fixtures/         sample-APK generator (make_sample_apk.py)

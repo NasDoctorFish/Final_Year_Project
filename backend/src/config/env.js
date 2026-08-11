@@ -44,7 +44,18 @@ const usingEmulators = Boolean(
   process.env.FIRESTORE_EMULATOR_HOST || process.env.FIREBASE_AUTH_EMULATOR_HOST
 );
 
-if (!usingEmulators && !serviceAccountPath && !hasInlineCredentials) {
+/**
+ * A fourth credential source: Google Cloud's own hosting products (Cloud Run, Cloud
+ * Functions, App Engine, GCE) hand every process Application Default Credentials via
+ * an on-instance metadata server, so no key ever needs to exist on disk or in an env
+ * var. K_SERVICE/K_REVISION/K_CONFIGURATION are set automatically by Cloud Run;
+ * GOOGLE_CLOUD_PROJECT and GAE_SERVICE cover Cloud Functions and App Engine.
+ */
+const runningOnGoogleCloud = Boolean(
+  process.env.K_SERVICE || process.env.GOOGLE_CLOUD_PROJECT || process.env.GAE_SERVICE
+);
+
+if (!usingEmulators && !serviceAccountPath && !hasInlineCredentials && !runningOnGoogleCloud) {
   throw new Error(
     "No Firebase credentials found. Set GOOGLE_APPLICATION_CREDENTIALS to a service " +
       "account JSON path, or set FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL and " +

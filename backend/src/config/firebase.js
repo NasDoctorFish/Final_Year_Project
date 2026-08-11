@@ -20,7 +20,9 @@ function buildCredential() {
       privateKey: env.firebase.privateKey,
     });
   }
-  // Falls back to GOOGLE_APPLICATION_CREDENTIALS, which the SDK reads itself.
+  // Falls back to Application Default Credentials: GOOGLE_APPLICATION_CREDENTIALS if
+  // set, otherwise (on Cloud Run/Cloud Functions/GCE) the instance's own metadata
+  // server, which the SDK queries automatically with no key on disk anywhere.
   return applicationDefault();
 }
 

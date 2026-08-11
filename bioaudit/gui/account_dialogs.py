@@ -13,7 +13,6 @@ thinks it is still signed in.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from ..api import ApiClient, ApiClientError
 

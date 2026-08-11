@@ -1,18 +1,24 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller spec for a full BioAudit.exe (GUI + scanner + PDF + AI).
+"""PyInstaller spec for a full BioAudit.exe (GUI + scanner + PDF).
 
 Build:   pyinstaller BioAudit.spec
 Output:  dist/BioAudit.exe
 
-See docs/BUILD-EXE.md for the prerequisites — in particular weasyprint needs the
+See docs/FRONTEND-GUIDE.md for the prerequisites — in particular weasyprint needs the
 native GTK/Pango/Cairo libraries present on the *build* machine, and the target
 device still needs the `adb` binary (it is an external CLI, not a Python package,
 so it cannot be frozen in).
+
+AI explanation does not ship in this exe at all: it runs entirely on the backend
+(the Gemini SDK lives only in backend/, a Node package), called over HTTPS through
+ApiClient.explain_finding. There used to be a second, local AI path bundled in here
+too (google-genai + a knowledge-base file), removed because it only worked on
+whichever PC happened to have its own GEMINI_API_KEY set.
 """
 
 import os
 
-from PyInstaller.utils.hooks import collect_all, collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 # Make the GTK/Pango libraries visible to weasyprint's PyInstaller hook at build
 # time, independent of the shell's environment (setx only affects new terminals).
@@ -27,19 +33,6 @@ else:
 datas = []
 binaries = []
 hiddenimports = []
-
-# The Gemini SDK ships data files / dynamically imported submodules and has no
-# built-in PyInstaller hook, so collect it in full. (pydantic, numpy, PySide6,
-# weasyprint all have standard/contrib hooks — naming them here would only drag
-# in their test suites and bloat the exe.)
-for pkg in ("google.genai",):
-    try:
-        d, b, h = collect_all(pkg)
-        datas += d
-        binaries += b
-        hiddenimports += h
-    except Exception as exc:  # a missing optional package should not abort the build
-        print(f"[spec] skipping {pkg}: {exc}")
 
 # androguard: collect the parsing core + decompiler only. androguard.pentest's
 # __init__ does `import frida` then `exit()` when frida is absent, which crashes
@@ -68,10 +61,10 @@ hiddenimports += [
     "bioaudit.gui.team",
     "bioaudit.gui.account_dialogs",
     "bioaudit.runtime.response_oracle",
-    "bioaudit.storage.history",
+    "bioaudit.session",
 ]
 
-# Ship the AI knowledge base and any bundled config alongside the exe.
+# Ship the bundled config (including config.example.yaml) alongside the exe.
 datas += [("config", "config")]
 
 
@@ -84,7 +77,21 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["streamlit", "tkinter", "frida", "androguard.pentest", "google.genai.tests"],
+    # `streamlit` itself is excluded because `dashboard` shells out to it as a separate
+    # process (subprocess.call(["streamlit", ...])) rather than importing it in-process
+    # — but PyInstaller still followed its *dependencies* into the build even with the
+    # package itself excluded, since something in the graph re-imports them. pandas and
+    # pyarrow are only ever needed by streamlit (confirmed via `pip show`, "Required-by:
+    # streamlit"); nothing in bioaudit/ imports either. scipy has no "Required-by" at
+    # all — dead weight, probably left over from an earlier version of the codebase.
+    # QtQml/QtQuick/QtPdf are never imported either (only QtCore/QtGui/QtWidgets are) —
+    # confirmed by grepping every `from PySide6.*` import in the source tree.
+    excludes=[
+        "streamlit", "tkinter", "frida", "androguard.pentest",
+        "pandas", "pyarrow", "scipy",
+        "PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
+        "PySide6.QtPdf", "PySide6.QtPdfWidgets",
+    ],
     noarchive=False,
 )
 

@@ -3,9 +3,8 @@ androguard>=4.1.0        # APK decompilation + manifest parsing
 numpy>=1.26              # statistics (robust-z outlier detection)
 pyyaml>=6.0              # config
 
-# AI layer (optional at runtime; findings work without it)
-google-genai>=1.0        # Gemini API for explanation/mitigation
-pydantic>=2.6            # structured AI output validation
+# AI explanation is not a client-side dependency: it runs entirely on the backend
+# (backend/ has its own Node-side Gemini SDK). Nothing to install here for it.
 
 # Desktop GUI (optional; core + CLI run without it)
 PySide6>=6.6             # native desktop app: python -m bioaudit gui

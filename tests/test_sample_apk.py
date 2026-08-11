@@ -57,7 +57,7 @@ def test_full_scan_ranks_and_dials_back(apk):
     from bioaudit import core
 
     run = core.build_scan_apk(apk, Config())
-    run.findings = recommendations.process(run.findings, explainer=None)
+    run.findings = recommendations.process(run.findings)
 
     titles = {f.title for f in run.findings}
     assert "Application is debuggable" in titles

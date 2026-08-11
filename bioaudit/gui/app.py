@@ -46,14 +46,25 @@ def _make_worker_classes():
     class Worker(QObject):
         finished = Signal(object)   # emits the return value of `fn`
         failed = Signal(str)        # emits a formatted traceback / message
+        progress = Signal(str)      # emits a plain-language step description
+        cancelled = Signal()        # emits when the job stopped at the user's request
 
-        def __init__(self, fn: Callable[[], object]):
+        def __init__(self, fn: Callable[[Callable[[str], None]], object]):
             super().__init__()
             self._fn = fn
 
         def run(self) -> None:
+            from .. import core
+
             try:
-                result = self._fn()
+                # The job is handed the emitter rather than the signal itself, so job
+                # closures stay plain callables and know nothing about Qt.
+                result = self._fn(self.progress.emit)
+            except core.ScanCancelled:
+                # Not a failure. The user asked for this, so it gets its own path and
+                # does not show them a traceback for something they chose.
+                self.cancelled.emit()
+                return
             except Exception as exc:  # noqa: BLE001 - surfaced to the user
                 tb = traceback.format_exc()
                 _log_diag(f"Worker job raised:\n{tb}")
@@ -118,8 +129,8 @@ def run(cfg: Config | None = None) -> int:
     from PySide6.QtCore import QUrl
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QFileDialog, QFormLayout,
-        QGroupBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
-        QMessageBox, QProgressBar, QPushButton, QSizePolicy, QTabWidget,
+        QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+        QMessageBox, QProgressBar, QPushButton, QTabWidget,
         QTextBrowser, QVBoxLayout, QWidget,
     )
 
@@ -154,17 +165,16 @@ def run(cfg: Config | None = None) -> int:
     cfg = cfg or Config.load()
 
     # A double-clicked exe can start in a directory it cannot write to (Program
-    # Files, a read-only mount, etc.), which would make the SQLite history and the
-    # report export raise. Anchor both under the user's home so writes always work.
-    from pathlib import Path
-    _base = Path(os.path.expanduser("~")) / "BioAudit"
+    # Files, a read-only mount, etc.), which would make the report export raise.
+    # Anchor it, and the saved session file, under the user's home so writes always work.
+    from .. import session as _session_module
     try:
-        _base.mkdir(parents=True, exist_ok=True)
-        if not os.path.isabs(cfg.storage["database"]):
-            cfg.storage["database"] = str(_base / cfg.storage["database"])
+        _base = _session_module.default_base_dir()
         if not os.path.isabs(cfg.report["output_dir"]):
             cfg.report["output_dir"] = str(_base / cfg.report["output_dir"])
     except Exception as exc:  # noqa: BLE001
+        from pathlib import Path
+        _base = Path(os.path.expanduser("~")) / "BioAudit"
         _log_diag(f"could not set up writable output dir: {exc}")
 
     class MainWindow(QMainWindow):
@@ -175,6 +185,10 @@ def run(cfg: Config | None = None) -> int:
             self._worker: Worker | None = None
             self._last_report_path: str | None = None
             self._job_ctx: dict | None = None
+            # Set while a job runs so the worker thread can see a cancel request. An Event
+            # is used rather than a plain bool because it is written on the UI thread and
+            # read on the worker thread.
+            self._cancel_event = None
             # Set when a run has been saved to the account, which is what the server-backed
             # explain and export buttons need.
             self._last_scan_id: str | None = None
@@ -214,6 +228,14 @@ def run(cfg: Config | None = None) -> int:
             self.statusBar().showMessage("Ready")
             self._restore_saved_session()
             self._refresh_account_ui()
+
+            # The welcome gate is a startup step, not a constructor step: show it once the
+            # window itself is on screen (via a zero-delay timer) so it appears over a
+            # painted app rather than a blank one. Skipped when a saved session already
+            # signed the user in, and suppressible for automated tests.
+            if self.api is None and not os.environ.get("BIOAUDIT_SKIP_WELCOME"):
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, self._require_signed_in_or_quit)
 
         # ---- Account ------------------------------------------------------ #
 
@@ -260,17 +282,64 @@ def run(cfg: Config | None = None) -> int:
             Runs on startup, so it must never block for long or raise. A dead session or
             an unreachable server simply leaves the app signed out.
             """
-            if not self.cfg.api.get("enabled", False):
+            # A saved session means the user ticked "keep me signed in", so honour it even
+            # when the API section is off by default: choosing to stay signed in is itself
+            # the opt-in. Skip the work only when neither the flag nor a saved file exists.
+            from ..session import restore_session, session_path
+            if not self.cfg.api.get("enabled", False) and not session_path(self._session_dir).exists():
                 return
             try:
-                from .signin import restore_session
                 client = restore_session(self._session_dir, self.cfg.api["base_url"])
             except Exception as exc:  # noqa: BLE001
                 _log_diag(f"session restore failed: {exc}")
                 return
             if client is not None:
                 self.api = client
+                self.cfg.api["enabled"] = True
                 self.statusBar().showMessage("Signed in from a saved session.")
+
+        def _show_welcome_gate(self) -> bool:
+            """Front door: the user must register, join a team, or sign in to continue.
+
+            Follows the functional hierarchy's unregistered-user paths (register / join via
+            invite), with a sign-in tab for returning users. There is no guest mode: BioAudit
+            keeps no local copy of a scan, so with nobody signed in there is nowhere for a
+            result to go. Returns whether the user ended up signed in.
+            """
+            from .signin import show_welcome_dialog
+
+            try:
+                client, _remember = show_welcome_dialog(
+                    self, base_url=self.cfg.api["base_url"], base_dir=self._session_dir)
+            except Exception as exc:  # noqa: BLE001 - a broken gate must not trap the user
+                _log_diag(f"welcome gate failed: {exc}")
+                client = None
+
+            if client is None:
+                return False
+
+            self.api = client
+            self.cfg.api["enabled"] = True
+            self.statusBar().showMessage(f"Signed in as {client.account.email}.")
+            self._refresh_account_ui()
+            return True
+
+        def _require_signed_in_or_quit(self) -> None:
+            """Show the welcome gate; close the app if it is dismissed without signing in.
+
+            There is nothing a signed-out session can do here: no local storage to fall
+            back to, no guest mode. Closing rather than limping on with a dead window is
+            the honest response, and mirrors what clicking the window's own close button
+            does, so it needs no special-casing at the call sites.
+
+            Skipped under the same flag the startup gate honours: an automated test that
+            drives sign-out directly wants to inspect the resulting signed-out state, not
+            hit a blocking modal dialog or have the process quit out from under it.
+            """
+            if os.environ.get("BIOAUDIT_SKIP_WELCOME"):
+                return
+            if not self._show_welcome_gate():
+                self.close()
 
         def _refresh_account_ui(self) -> None:
             from .signin import account_summary
@@ -297,16 +366,9 @@ def run(cfg: Config | None = None) -> int:
                 else "Comparing runs is part of the premium plan.")
 
             self.team_tab.refresh_visibility()
-
-            # The sync checkboxes only mean something with somewhere to sync to.
-            for box in (self.scan_sync, self.assess_sync):
-                box.setEnabled(signed_in)
-                box.setToolTip(
-                    "Upload this run to your account when it finishes."
-                    if signed_in
-                    else "Sign in from the Account menu to save results to the server."
-                )
-            self.cloud_history_btn.setEnabled(signed_in)
+            # The History tab has nothing of its own to poll on a timer, so any moment
+            # the signed-in account might have changed is also a moment to refresh it.
+            self._reload_history()
 
         def _sign_in(self) -> None:
             from .signin import show_signin_dialog
@@ -332,7 +394,10 @@ def run(cfg: Config | None = None) -> int:
             clear_session(self._session_dir)
             self.api = None
             self._refresh_account_ui()
-            self.statusBar().showMessage("Signed out. Results stay on this computer.")
+            self.statusBar().showMessage("Signed out.")
+            # No account, no local storage, nowhere for the next scan to go: ask for a
+            # sign-in immediately rather than leaving buttons on screen that would fail.
+            self._require_signed_in_or_quit()
 
         def _upgrade(self) -> None:
             if self.api is None:
@@ -404,6 +469,7 @@ def run(cfg: Config | None = None) -> int:
             self.api = None
             self._refresh_account_ui()
             self.statusBar().showMessage(message or "Signed out.")
+            self._require_signed_in_or_quit()
 
         def _show_account_details(self) -> None:
             if self.api is None:
@@ -436,9 +502,6 @@ def run(cfg: Config | None = None) -> int:
 
         # ---- Server sync -------------------------------------------------- #
 
-        def _sync_enabled(self, checkbox) -> bool:
-            return self.api is not None and checkbox.isChecked()
-
         def _upload(self, run_, *, authorised: bool, apk_file_name: str | None,
                     into: dict) -> None:
             """Upload a finished run, recording the outcome in `into`.
@@ -448,8 +511,9 @@ def run(cfg: Config | None = None) -> int:
             finished signal arrives. Emitting that signal is the handover point, so no
             further synchronisation is needed.
 
-            An upload failure must never lose the scan, which is why every error is
-            captured rather than raised.
+            Every error is captured rather than raised, so a failed upload cannot crash
+            the job — but note that BioAudit keeps no local copy, so a failure here really
+            does mean the run is not saved anywhere until a retry succeeds.
             """
             from ..api import ApiClientError
 
@@ -466,6 +530,54 @@ def run(cfg: Config | None = None) -> int:
                 into["error"] = exc.message
             except Exception as exc:  # noqa: BLE001
                 into["error"] = f"{type(exc).__name__}: {exc}"
+
+        def _retry_upload(self) -> None:
+            """Try again to save the last run whose upload failed.
+
+            Runs on the main thread with a short blocking call rather than spinning up a
+            whole worker thread: the run's findings already exist, this is just one HTTP
+            request, and the wait cursor is enough feedback for something this quick.
+            """
+            ctx = self._job_ctx
+            if not ctx or ctx.get("run") is None:
+                return
+            if self.api is None:
+                QMessageBox.information(
+                    self, "Not signed in",
+                    "Sign in from the Account menu, then retry saving this run.")
+                return
+
+            retry_btn = ctx.get("retry_btn")
+            if retry_btn is not None:
+                retry_btn.setEnabled(False)
+            self.setCursor(Qt.WaitCursor)
+            try:
+                sync_result: dict = {}
+                self._upload(ctx["run"], authorised=True,
+                            apk_file_name=ctx.get("apk_file_name"), into=sync_result)
+            finally:
+                self.setCursor(Qt.ArrowCursor)
+
+            ctx["sync"] = sync_result
+            self._last_scan_id = sync_result.get("scan_id")
+            premium = bool(self.api and self.api.account and self.api.account.is_premium)
+            for explain_btn, save_btn in (
+                (self.scan_explain_btn, self.scan_save_report_btn),
+                (self.assess_explain_btn, self.assess_save_report_btn),
+            ):
+                explain_btn.setEnabled(bool(self._last_scan_id))
+                save_btn.setEnabled(bool(self._last_scan_id) and premium)
+
+            html = _sync_banner_html(sync_result) + generator.render_html(ctx["run"])
+            ctx["results_view"].setHtml(html)
+            if retry_btn is not None:
+                retry_btn.setEnabled(True)
+                retry_btn.setVisible(bool(sync_result.get("error")))
+
+            self.statusBar().showMessage(
+                "Saved to your account." if sync_result.get("scan_id")
+                else f"Still not saved: {sync_result.get('error', 'unknown error')}")
+            self._reload_history()
 
         # ---- Scan APK tab ------------------------------------------------- #
 
@@ -491,15 +603,6 @@ def run(cfg: Config | None = None) -> int:
                 "Reads the app's settings and compiled code without running it. No phone needed."))
             layout.addWidget(target)
 
-            # --- options ----------------------------------------------
-            options, ol = _section("Options")
-            self.scan_explain = QCheckBox("Explain each finding in plain language (uses the AI layer)")
-            self.scan_sync = QCheckBox("Save this run to my account")
-            self.scan_sync.setChecked(bool(self.cfg.api.get("auto_sync", True)))
-            ol.addWidget(self.scan_explain)
-            ol.addWidget(self.scan_sync)
-            layout.addWidget(options)
-
             # --- action -----------------------------------------------
             action = QHBoxLayout()
             action.setSpacing(10)
@@ -523,12 +626,33 @@ def run(cfg: Config | None = None) -> int:
             self.scan_save_report_btn.setToolTip(
                 "Download this run's report from your account. Part of the premium plan.")
             self.scan_save_report_btn.clicked.connect(self._save_server_report)
+            # Only shown while a run is going, so the row is not cluttered when idle.
+            self.scan_cancel_btn = QPushButton("Cancel")
+            self.scan_cancel_btn.setToolTip(
+                "Stop after the current step finishes. A step already reading the file "
+                "cannot be interrupted part way.")
+            self.scan_cancel_btn.clicked.connect(self._cancel_job)
+            self.scan_cancel_btn.hide()
+            # Only shown when the automatic upload failed, since BioAudit keeps no local
+            # copy and this is the only way to get the run saved after that.
+            self.scan_retry_btn = QPushButton("Retry saving to your account")
+            self.scan_retry_btn.clicked.connect(self._retry_upload)
+            self.scan_retry_btn.hide()
+
             action.addWidget(self.scan_btn)
+            action.addWidget(self.scan_cancel_btn)
+            action.addWidget(self.scan_retry_btn)
             action.addWidget(self.scan_open_report)
             action.addWidget(self.scan_explain_btn)
             action.addWidget(self.scan_save_report_btn)
             action.addStretch(1)
             layout.addLayout(action)
+
+            # Naming the current step is what stops a long run looking like a freeze.
+            self.scan_stage = QLabel("")
+            self.scan_stage.setObjectName("hint")
+            self.scan_stage.hide()
+            layout.addWidget(self.scan_stage)
 
             self.scan_progress = QProgressBar()
             self.scan_progress.setRange(0, 0)  # indeterminate
@@ -549,7 +673,7 @@ def run(cfg: Config | None = None) -> int:
                 ["Choose an .apk file above, then run the scan.",
                  "It flags a debuggable build, backup exposure, screens left open to other "
                  "apps, and a fingerprint check that is not tied to a key.",
-                 "Nothing is sent anywhere unless you sign in and tick the save box."],
+                 "The result is saved to your account automatically when it finishes."],
                 self.palette_colours))
             layout.addWidget(self.scan_results, 1)
 
@@ -569,26 +693,30 @@ def run(cfg: Config | None = None) -> int:
                 QMessageBox.warning(self, "Not found", f"File does not exist:\n{apk}")
                 return
 
-            explain = self.scan_explain.isChecked()
-            sync = self._sync_enabled(self.scan_sync)
             sync_result: dict = {}
             apk_name = os.path.basename(apk)
 
-            def job() -> TestRun:
+            def job(report) -> TestRun:
                 # Heavy work on the worker thread; the report (weasyprint/GTK) is
                 # written later on the main thread in _start_job's finished handler.
-                run_ = core.build_scan_apk(apk, self.cfg)
-                core.process_findings(run_, self.cfg, explain)
-                if sync:
-                    # A static scan reads a file the user chose, so there is no live app
-                    # to authorise probing against.
-                    self._upload(run_, authorised=True, apk_file_name=apk_name,
-                                 into=sync_result)
+                stop = self._cancel_event
+                run_ = core.build_scan_apk(
+                    apk, self.cfg, on_progress=report,
+                    should_cancel=(stop.is_set if stop else None))
+                core.process_findings(run_, on_progress=report)
+                report("Saving to your account")
+                # A static scan reads a file the user chose, so there is no live app
+                # to authorise probing against. Uploading is not optional: BioAudit keeps
+                # no local copy, so this is the only place the run ends up.
+                self._upload(run_, authorised=True, apk_file_name=apk_name,
+                             into=sync_result)
                 return run_
 
             self._start_job(job, self.scan_btn, self.scan_progress, self.scan_results,
-                            self.scan_open_report, "Reading the app's files…",
-                            sync_result=sync_result, summary_label=self.scan_summary)
+                            self.scan_open_report, "Starting",
+                            sync_result=sync_result, summary_label=self.scan_summary,
+                            stage_label=self.scan_stage, cancel_btn=self.scan_cancel_btn,
+                            retry_btn=self.scan_retry_btn, apk_file_name=apk_name)
 
         # ---- Assess device tab -------------------------------------------- #
 
@@ -659,16 +787,6 @@ def run(cfg: Config | None = None) -> int:
                 "an app without permission can be an offence."))
             layout.addWidget(auth)
 
-            # --- options ----------------------------------------------
-            options, ol = _section("Options")
-            self.assess_ai = QCheckBox("Explain each finding in plain language (uses the AI layer)")
-            self.assess_ai.setChecked(True)
-            self.assess_sync = QCheckBox("Save this run to my account")
-            self.assess_sync.setChecked(bool(self.cfg.api.get("auto_sync", True)))
-            ol.addWidget(self.assess_ai)
-            ol.addWidget(self.assess_sync)
-            layout.addWidget(options)
-
             # --- action -----------------------------------------------
             action = QHBoxLayout()
             action.setSpacing(10)
@@ -692,12 +810,33 @@ def run(cfg: Config | None = None) -> int:
             self.assess_save_report_btn.setToolTip(
                 "Download this run's report from your account. Part of the premium plan.")
             self.assess_save_report_btn.clicked.connect(self._save_server_report)
+            # Only shown while a run is going, so the row is not cluttered when idle.
+            self.assess_cancel_btn = QPushButton("Cancel")
+            self.assess_cancel_btn.setToolTip(
+                "Stop after the current step finishes. A step already talking to the "
+                "device cannot be interrupted part way.")
+            self.assess_cancel_btn.clicked.connect(self._cancel_job)
+            self.assess_cancel_btn.hide()
+            # Only shown when the automatic upload failed, since BioAudit keeps no local
+            # copy and this is the only way to get the run saved after that.
+            self.assess_retry_btn = QPushButton("Retry saving to your account")
+            self.assess_retry_btn.clicked.connect(self._retry_upload)
+            self.assess_retry_btn.hide()
+
             action.addWidget(self.assess_btn)
+            action.addWidget(self.assess_cancel_btn)
+            action.addWidget(self.assess_retry_btn)
             action.addWidget(self.assess_open_report)
             action.addWidget(self.assess_explain_btn)
             action.addWidget(self.assess_save_report_btn)
             action.addStretch(1)
             layout.addLayout(action)
+
+            # Naming the current step is what stops a long run looking like a freeze.
+            self.assess_stage = QLabel("")
+            self.assess_stage.setObjectName("hint")
+            self.assess_stage.hide()
+            layout.addWidget(self.assess_stage)
 
             self.assess_progress = QProgressBar()
             self.assess_progress.setRange(0, 0)
@@ -782,29 +921,33 @@ def run(cfg: Config | None = None) -> int:
                 return
 
             serial = self.device_combo.currentText().strip()
-            explain = self.assess_ai.isChecked()
 
             # Honour the device selected in the combo box for this run.
             cfg = self.cfg
             selected_serial = serial if self.device_combo.isEnabled() else None
-            sync = self._sync_enabled(self.assess_sync)
             sync_result: dict = {}
             apk_name = os.path.basename(apk) if apk else None
 
-            def job() -> TestRun:
+            def job(report) -> TestRun:
+                stop = self._cancel_event
                 adb = Adb(cfg.device["adb_path"], selected_serial or cfg.device["serial"])
-                run_ = core.build_assess(package, apk, cfg, adb=adb)
-                core.process_findings(run_, cfg, explain)   # report written on main thread
-                if sync:
-                    # The authorisation box was ticked to get here, and the server
-                    # refuses a device assessment that does not carry that confirmation.
-                    self._upload(run_, authorised=True, apk_file_name=apk_name,
-                                 into=sync_result)
+                run_ = core.build_assess(
+                    package, apk, cfg, adb=adb, on_progress=report,
+                    should_cancel=(stop.is_set if stop else None))
+                core.process_findings(run_, on_progress=report)
+                report("Saving to your account")
+                # The authorisation box was ticked to get here, and the server refuses a
+                # device assessment that does not carry that confirmation. Uploading is
+                # not optional: BioAudit keeps no local copy of a run.
+                self._upload(run_, authorised=True, apk_file_name=apk_name,
+                             into=sync_result)
                 return run_
 
             self._start_job(job, self.assess_btn, self.assess_progress, self.assess_results,
-                            self.assess_open_report, "Testing the app on the device…",
-                            sync_result=sync_result, summary_label=self.assess_summary)
+                            self.assess_open_report, "Starting",
+                            sync_result=sync_result, summary_label=self.assess_summary,
+                            stage_label=self.assess_stage, cancel_btn=self.assess_cancel_btn,
+                            retry_btn=self.assess_retry_btn, apk_file_name=apk_name)
 
         # ---- History tab -------------------------------------------------- #
 
@@ -814,21 +957,14 @@ def run(cfg: Config | None = None) -> int:
             layout.setContentsMargins(16, 12, 16, 12)
             layout.setSpacing(10)
 
-            picker, pl = _section("Past runs on this computer")
+            picker, pl = _section("Your saved runs")
             top = QHBoxLayout()
             top.setSpacing(8)
             self.history_combo = QComboBox()
             reload_btn = QPushButton("Reload")
             reload_btn.clicked.connect(self._reload_history)
-            self.cloud_history_btn = QPushButton("Show account history")
-            self.cloud_history_btn.setToolTip(
-                "List the runs saved to your account, which may include runs from "
-                "another computer."
-            )
-            self.cloud_history_btn.clicked.connect(self._show_cloud_history)
             top.addWidget(self.history_combo, 1)
             top.addWidget(reload_btn)
-            top.addWidget(self.cloud_history_btn)
             pl.addLayout(top)
 
             actions = QHBoxLayout()
@@ -853,46 +989,74 @@ def run(cfg: Config | None = None) -> int:
             self.history_results.setOpenExternalLinks(True)
             layout.addWidget(self.history_results, 1)
 
+            self._history_ids: list[str] = []
             self._reload_history()
             return w
 
         def _reload_history(self) -> None:
-            from ..storage.history import History
+            """Refill the picker from the account's history on the server.
+
+            The only history there is: BioAudit keeps no local copy of a scan. Called
+            before the welcome gate has necessarily resolved (during tab construction),
+            so it tolerates `self.api` still being None rather than assuming sign-in.
+            """
             self.history_combo.blockSignals(True)
             self.history_combo.clear()
-            self._history_ids: list[str] = []
-            try:
-                runs = History(self.cfg.storage["database"]).list_runs()
-            except Exception as exc:  # noqa: BLE001
-                self.statusBar().showMessage(f"history error: {exc}")
-                runs = []
-            for r in runs:
-                sev = f"C{r['critical']} H{r['high']} M{r['medium']} L{r['low']} I{r['info']}"
-                self.history_combo.addItem(f"{r['package']} — {sev}  [{r['id']}]")
-                self._history_ids.append(r["id"])
+            self._history_ids = []
+            limit = None
+            load_error = None
+            if self.api is not None:
+                try:
+                    data = self.api.list_history(limit=100)
+                    limit = data.get("historyLimit")
+                    for scan in data.get("scans", []):
+                        counts = scan.get("counts") or {}
+                        sev = " ".join(
+                            f"{name[0].upper()}{counts.get(name, 0)}"
+                            for name in ("critical", "high", "medium", "low", "info")
+                            if counts.get(name)
+                        ) or "no findings"
+                        target = scan.get("target") or {}
+                        label = target.get("packageName") or target.get("apkFileName") or "unknown"
+                        when = str(scan.get("createdAt", ""))[:19]
+                        self.history_combo.addItem(f"{when}  {label} — {sev}")
+                        self._history_ids.append(scan["id"])
+                except Exception as exc:  # noqa: BLE001
+                    # Deliberately not the status bar: this can run right after a job
+                    # finished and left a more important message there (e.g. "not saved
+                    # to your account"), and a background history refresh failing is not
+                    # worth overwriting that with.
+                    load_error = str(exc)
+                    _log_diag(f"history reload failed: {load_error}")
             self.history_combo.blockSignals(False)
-            if self._history_ids:
+            if load_error:
+                self.history_results.setHtml(theme.empty_state_html(
+                    "Could not load your history",
+                    [load_error, "Click Reload to try again."], self.palette_colours))
+            elif self._history_ids:
                 self._show_history_run(0)
             else:
-                self.history_results.setHtml("<p>No runs yet. Run a scan or assessment first.</p>")
+                lines = ["Run a scan or an assessment first.",
+                         "Every finished run is saved to your account automatically."]
+                if limit is not None:
+                    lines.append(f"Your plan keeps the newest {limit} runs.")
+                self.history_results.setHtml(
+                    theme.empty_state_html("No runs yet", lines, self.palette_colours))
 
         def _show_history_run(self, index: int) -> None:
-            from ..storage.history import History
-            if index < 0 or index >= len(self._history_ids):
+            if self.api is None or index < 0 or index >= len(self._history_ids):
                 return
-            payload = History(self.cfg.storage["database"]).get(self._history_ids[index])
-            if payload:
-                self.history_results.setHtml(_payload_to_html(payload))
+            try:
+                scan = self.api.get_scan(self._history_ids[index])
+            except Exception as exc:  # noqa: BLE001
+                self.history_results.setHtml(
+                    f"<pre style='color:#b00020; white-space:pre-wrap'>{_escape(exc)}</pre>")
+                return
+            self.history_results.setHtml(_payload_to_html(scan))
 
         def _delete_history_run(self) -> None:
-            """Delete the selected run from this computer, and optionally from the account.
-
-            The two copies are removed separately and asked about separately, because a user
-            clearing their local history does not necessarily want to lose the copy their
-            team can see, or the other way round.
-            """
-            from ..storage.history import History
-
+            if self.api is None:
+                return
             index = self.history_combo.currentIndex()
             if index < 0 or index >= len(self._history_ids):
                 QMessageBox.information(self, "Nothing selected", "Pick a run from the list first.")
@@ -902,55 +1066,41 @@ def run(cfg: Config | None = None) -> int:
             label = self.history_combo.currentText()
             if QMessageBox.question(
                 self, "Delete run",
-                f"Delete this run from this computer?\n\n{label}",
+                f"Permanently delete this run from your account?\n\n{label}",
             ) != QMessageBox.Yes:
                 return
 
             try:
-                History(self.cfg.storage["database"]).delete(run_id)
+                self.api.delete_scan(run_id)
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, "Could not delete", str(exc))
                 return
 
-            self.statusBar().showMessage("Run deleted from this computer.")
+            self.statusBar().showMessage("Run deleted from your account.")
             self._reload_history()
 
         def _clear_history(self) -> None:
-            from ..storage.history import History
-
+            if self.api is None:
+                return
             if not self._history_ids:
                 QMessageBox.information(self, "Nothing to clear", "There is no history yet.")
                 return
 
             if QMessageBox.question(
                 self, "Clear history",
-                f"Delete all {len(self._history_ids)} run(s) from this computer?\n\n"
-                "This cannot be undone. Exported report files are not affected.",
+                f"Permanently delete all {len(self._history_ids)} run(s) saved to your "
+                "account?\n\nThis cannot be undone. Exported report files on this "
+                "computer are not affected.",
             ) != QMessageBox.Yes:
                 return
 
             try:
-                removed = History(self.cfg.storage["database"]).clear()
+                removed = self.api.clear_history()
             except Exception as exc:  # noqa: BLE001
                 QMessageBox.warning(self, "Could not clear history", str(exc))
                 return
 
-            # Offer the server copy separately rather than assuming.
-            if self.api is not None:
-                if QMessageBox.question(
-                    self, "Clear account history",
-                    "Also delete the runs saved to your account on the server?",
-                ) == QMessageBox.Yes:
-                    try:
-                        server_removed = self.api.clear_history()
-                        self.statusBar().showMessage(
-                            f"Cleared {removed} local and {server_removed} account run(s).")
-                    except Exception as exc:  # noqa: BLE001
-                        QMessageBox.warning(self, "Could not clear account history", str(exc))
-                    self._reload_history()
-                    return
-
-            self.statusBar().showMessage(f"Cleared {removed} run(s) from this computer.")
+            self.statusBar().showMessage(f"Cleared {removed} run(s) from your account.")
             self._reload_history()
 
         def _compare_runs(self) -> None:
@@ -976,7 +1126,8 @@ def run(cfg: Config | None = None) -> int:
                 QMessageBox.information(
                     self, "Not enough runs",
                     "You need at least two runs saved to your account before they can be "
-                    "compared. Tick \"Save this run to my account\" when you scan.")
+                    "compared. Run a scan or an assessment first — every finished run is "
+                    "saved automatically.")
                 return
 
             def describe(scan: dict) -> str:
@@ -1037,89 +1188,34 @@ def run(cfg: Config | None = None) -> int:
                 f"Comparison: {summary['resolved']} fixed, {summary['introduced']} new, "
                 f"{summary['unchanged']} unchanged.")
 
-        def _show_cloud_history(self) -> None:
-            """List what the account has stored on the server.
-
-            Deliberately a separate view rather than merged into the local list. The two
-            can legitimately differ: a free account is trimmed to its newest runs on the
-            server while the local database keeps everything, and merging them would hide
-            that difference instead of showing it.
-            """
-            if self.api is None:
-                QMessageBox.information(
-                    self, "Not signed in",
-                    "Sign in from the Account menu to see the runs saved to your account."
-                )
-                return
-
-            try:
-                data = self.api.list_history(limit=100)
-            except Exception as exc:  # noqa: BLE001
-                QMessageBox.warning(self, "Could not load history", str(exc))
-                return
-
-            scans = data.get("scans", [])
-            limit = data.get("historyLimit")
-            rows = []
-            for scan in scans:
-                counts = scan.get("counts") or {}
-                severities = " ".join(
-                    f"{name[0].upper()}{counts.get(name, 0)}"
-                    for name in ("critical", "high", "medium", "low", "info")
-                    if counts.get(name)
-                ) or "no findings"
-                target = (scan.get("target") or {})
-                # Show the package name as the identity, but keep the file or device it
-                # came from as well. Without that, two runs of the same app from
-                # different APK builds look identical in this list.
-                label = target.get("packageName") or target.get("apkFileName") or "unknown target"
-                source = target.get("apkFileName") or target.get("deviceSerial")
-                if source and source != label:
-                    label = f"{label}<br><span style='color:#5f6368;font-size:11px'>{_escape(source)}</span>"
-                else:
-                    label = _escape(label)
-
-                kind = "device" if scan.get("type") == "device" else "file"
-                rows.append(
-                    f"<tr><td>{_escape(str(scan.get('createdAt', ''))[:19])}</td>"
-                    f"<td>{label}</td><td>{kind}</td>"
-                    f"<td>{_escape(severities)}</td>"
-                    f"<td style='color:#5f6368'>{_escape(scan.get('id', ''))}</td></tr>"
-                )
-
-            note = (
-                f"Your plan keeps the newest {limit} runs on the server. "
-                "Older ones are removed there, though this computer still has them below."
-                if limit is not None
-                else "Your plan keeps your full history on the server."
-            )
-
-            if rows:
-                body = (
-                    "<table cellpadding='5' cellspacing='0' border='0'>"
-                    "<tr style='background:#f1f3f4'><th align='left'>When</th>"
-                    "<th align='left'>Target</th><th align='left'>Kind</th>"
-                    "<th align='left'>Findings</th><th align='left'>Reference</th></tr>"
-                    + "".join(rows) + "</table>"
-                )
-            else:
-                body = "<p>No runs have been saved to this account yet.</p>"
-
-            self.history_results.setHtml(
-                f"<h2>Account history</h2><p style='color:#5f6368'>{note}</p>{body}"
-            )
-            self.statusBar().showMessage(f"{len(scans)} run(s) saved to your account.")
 
         # ---- Shared job machinery ----------------------------------------- #
 
         def _start_job(self, job, button, progress, results_view, open_btn, status_msg,
-                       sync_result: dict | None = None, summary_label=None) -> None:
+                       sync_result: dict | None = None, summary_label=None,
+                       stage_label=None, cancel_btn=None, retry_btn=None,
+                       apk_file_name: str | None = None) -> None:
+            import threading
+
             if self._thread is not None:
                 QMessageBox.information(self, "Busy", "A task is already running.")
                 return
 
+            self._cancel_event = threading.Event()
+
             button.setEnabled(False)
+            button.hide()
             open_btn.setEnabled(False)
+            if cancel_btn is not None:
+                cancel_btn.setEnabled(True)
+                cancel_btn.show()
+            if retry_btn is not None:
+                # A previous failed run's retry button must not linger once a fresh run
+                # starts; it gets its own chance to show again if this one fails too.
+                retry_btn.hide()
+            if stage_label is not None:
+                stage_label.setText(status_msg)
+                stage_label.show()
             progress.show()
             # Clear the previous run's badges so a stale summary is never shown beside
             # a run that is still going.
@@ -1138,6 +1234,11 @@ def run(cfg: Config | None = None) -> int:
                 "results_view": results_view, "open_btn": open_btn,
                 "sync": sync_result if sync_result is not None else {},
                 "summary": summary_label,
+                "stage": stage_label,
+                "cancel_btn": cancel_btn,
+                "retry_btn": retry_btn,
+                "apk_file_name": apk_file_name,
+                "run": None,
             }
 
             self._thread = QThread()
@@ -1151,10 +1252,50 @@ def run(cfg: Config | None = None) -> int:
             # is safe off the main thread (doing so segfaults the frozen build).
             self._worker.finished.connect(self._on_job_finished)
             self._worker.failed.connect(self._on_job_failed)
+            self._worker.progress.connect(self._on_job_progress)
+            self._worker.cancelled.connect(self._on_job_cancelled)
             self._thread.start()
+
+        def _on_job_progress(self, stage: str) -> None:
+            """Show the step the worker has just started. Runs on the main thread."""
+            ctx = self._job_ctx or {}
+            label = ctx.get("stage")
+            if label is not None:
+                label.setText(stage + "…")
+            self.statusBar().showMessage(stage + "…")
+
+        def _cancel_job(self) -> None:
+            """Ask the running job to stop at its next step boundary."""
+            if self._cancel_event is None:
+                return
+            self._cancel_event.set()
+            ctx = self._job_ctx or {}
+            if ctx.get("cancel_btn") is not None:
+                # Disabled rather than hidden, so the user can see the request landed
+                # instead of wondering whether the click registered.
+                ctx["cancel_btn"].setEnabled(False)
+            if ctx.get("stage") is not None:
+                ctx["stage"].setText("Stopping after the current step…")
+            self.statusBar().showMessage("Stopping after the current step…")
+
+        def _on_job_cancelled(self) -> None:
+            ctx = self._job_ctx
+            if ctx.get("stage") is not None:
+                ctx["stage"].hide()
+            ctx["results_view"].setHtml(theme.empty_state_html(
+                "Stopped",
+                ["You cancelled this run, so no findings were produced.",
+                 "Nothing was saved and nothing on the device was changed.",
+                 "Start it again whenever you are ready."],
+                self.palette_colours))
+            self.statusBar().showMessage("Run cancelled.")
+            self._cleanup_thread(ctx["button"], ctx["progress"])
 
         def _on_job_finished(self, run_: object) -> None:
             ctx = self._job_ctx
+            ctx["run"] = run_   # kept for the retry button, whether or not the upload worked
+            if ctx.get("stage") is not None:
+                ctx["stage"].hide()
             try:
                 self._last_report_path = core.write_report(run_, self.cfg)
             except Exception as exc:  # noqa: BLE001 - findings still shown
@@ -1164,22 +1305,12 @@ def run(cfg: Config | None = None) -> int:
             html = generator.render_html(run_)
 
             # Prepend the sync outcome so a failed upload is visible without hiding the
-            # findings, which are the point of the run and are already safe on disk.
+            # findings, which are the point of the run.
             sync = ctx.get("sync") or {}
-            if sync.get("error"):
-                html = (
-                    "<div style='background:#fce8e6;border-left:4px solid #d93025;"
-                    "padding:8px 12px;margin-bottom:12px'>"
-                    f"<b>Not saved to your account:</b> {_escape(sync['error'])}<br>"
-                    "The findings below are saved on this computer and the report was "
-                    "still written.</div>" + html
-                )
-            elif sync.get("message"):
-                html = (
-                    "<div style='background:#e6f4ea;border-left:4px solid #188038;"
-                    "padding:8px 12px;margin-bottom:12px'>"
-                    f"{_escape(sync['message'])}</div>" + html
-                )
+            html = _sync_banner_html(sync) + html
+            if ctx.get("retry_btn") is not None:
+                ctx["retry_btn"].setVisible(bool(sync.get("error")))
+                ctx["retry_btn"].setEnabled(True)
 
             ctx["results_view"].setHtml(html)
             ctx["open_btn"].setEnabled(self._last_report_path is not None)
@@ -1217,6 +1348,8 @@ def run(cfg: Config | None = None) -> int:
 
         def _on_job_failed(self, msg: str) -> None:
             ctx = self._job_ctx
+            if ctx.get("stage") is not None:
+                ctx["stage"].hide()
             ctx["results_view"].setHtml(
                 f"<pre style='color:#b00020; white-space:pre-wrap'>{msg}</pre>")
             self.statusBar().showMessage("Failed")
@@ -1225,6 +1358,11 @@ def run(cfg: Config | None = None) -> int:
         def _cleanup_thread(self, button, progress) -> None:
             progress.hide()
             button.setEnabled(True)
+            button.show()
+            ctx = self._job_ctx or {}
+            if ctx.get("cancel_btn") is not None:
+                ctx["cancel_btn"].hide()
+            self._cancel_event = None
             if self._thread is not None:
                 self._thread.quit()
                 self._thread.wait()
@@ -1393,19 +1531,57 @@ def _escape(value: object) -> str:
     return html.escape(str(value if value is not None else ""))
 
 
+def _sync_banner_html(sync: dict) -> str:
+    """The strip shown above a run's findings reporting whether it saved.
+
+    Shared between a fresh run and a retry, so both look identical. There is no local
+    fallback to reassure the user about on failure: the account is the only place a run
+    is stored, so the banner says that plainly and points at the retry button instead.
+    """
+    if sync.get("error"):
+        return (
+            "<div style='background:#fce8e6;border-left:4px solid #d93025;"
+            "padding:8px 12px;margin-bottom:12px'>"
+            f"<b>Not saved to your account:</b> {_escape(sync['error'])}<br>"
+            "This run is not stored anywhere yet — BioAudit does not keep a local copy. "
+            "The findings are still shown below; use \"Retry saving\" once you are back "
+            "online, or before you close this run.</div>"
+        )
+    if sync.get("message"):
+        return (
+            "<div style='background:#e6f4ea;border-left:4px solid #188038;"
+            "padding:8px 12px;margin-bottom:12px'>"
+            f"{_escape(sync['message'])}</div>"
+        )
+    return ""
+
+
 def _payload_to_html(payload: dict) -> str:
-    """Reconstruct a TestRun from a stored payload and render it via the report
-    generator, so history entries look identical to fresh results."""
+    """Reconstruct a TestRun from a scan fetched from the server and render it via the
+    report generator, so a history entry looks identical to a fresh result.
+
+    The shape here is whatever `ApiClient.get_scan` returns — a package/device name
+    nested under `target`, and each finding's severity stored as its lower-case enum
+    name (see `_finding_to_payload` in `api/client.py`), not the capitalised label a
+    fresh `TestRun` uses on screen.
+    """
     from ..models import Finding, Severity
 
-    _sev = {s.label: s for s in Severity}
-    run = TestRun(package=payload.get("package", "?"))
+    def severity_from(value: str) -> Severity:
+        try:
+            return Severity[str(value).upper()]
+        except KeyError:
+            return Severity.INFO
+
+    target = payload.get("target") or {}
+    package = target.get("packageName") or target.get("apkFileName") or "?"
+    run = TestRun(package=package, device_serial=target.get("deviceSerial"))
     run.id = payload.get("id", run.id)
     for fd in payload.get("findings", []):
         run.add(Finding(
             category=fd.get("category", ""),
             title=fd.get("title", ""),
-            severity=_sev.get(fd.get("severity", "Info"), Severity.INFO),
+            severity=severity_from(fd.get("severity", "info")),
             owasp=fd.get("owasp", []),
             evidence=fd.get("evidence", ""),
             source=fd.get("source", ""),

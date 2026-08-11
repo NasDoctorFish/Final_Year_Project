@@ -28,7 +28,7 @@ def make_team_tab(parent_window, palette: dict):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import (
         QAbstractItemView, QDialog, QDialogButtonBox, QComboBox, QFormLayout,
-        QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit,
+        QHBoxLayout, QInputDialog, QLabel, QLineEdit,
         QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QTabWidget,
         QTextEdit, QVBoxLayout, QWidget,
     )

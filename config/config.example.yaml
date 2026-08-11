@@ -1,4 +1,8 @@
 # Copy to config/config.yaml and edit. config.yaml is gitignored.
+#
+# No `ai:` section: AI explanation runs entirely on the backend now (see
+# backend/.env.example's GEMINI_API_KEY / GEMINI_MODEL), not on whichever machine
+# happens to run the CLI or GUI. There is nothing to configure client-side for it.
 
 device:
   serial: null            # specific adb serial, or null to auto-select the only device
@@ -10,33 +14,14 @@ runtime:
   # Wait (seconds) for a screen to settle before observing.
   settle_seconds: 2
 
-ai:
-  enabled: true
-  # The AI explanation layer uses the Gemini API (Google).
-  # Set your key in GEMINI_API_KEY (or GOOGLE_API_KEY).
-  # Model id. Leave null to use the default (gemini-flash-latest); the backend
-  # auto-discovers an available model if that one is ever retired.
-  model: null
-  # Redact secrets from all content before it is sent to the model.
-  redact_before_send: true
-  # Effort hint for the explanation/mitigation generation.
-  effort: medium
-  # Path to the grounding knowledge base.
-  knowledge_base: config/knowledge_base/android_biometric_kb.md
-
 api:
-  # Optional backend for accounts, shared history, and server-side AI explanations.
-  # Off by default: the scanner, the CLI, and the report writer all work with no server,
-  # and nothing here is needed to find a vulnerability. Signing in from the desktop app's
-  # Account menu turns it on for that session.
+  # Backend for accounts and history. BioAudit keeps no local copy of a scan, so signing
+  # in is required before scan-apk, assess, or the GUI's scan tabs will do anything;
+  # `enabled` just tracks whether this run has signed in yet. Defaults to the hosted
+  # Cloud Run deployment; point at http://127.0.0.1:4000/api instead to use a backend
+  # you're running yourself (see backend/README.md).
   enabled: false
-  base_url: http://127.0.0.1:4000/api
-  # Upload each finished run automatically once signed in. When false, results stay on
-  # this machine unless you tick the box on the scan tab.
-  auto_sync: true
-
-storage:
-  database: bioaudit.sqlite
+  base_url: https://bioaudit-api-391854054876.us-central1.run.app/api
 
 report:
   output_dir: reports

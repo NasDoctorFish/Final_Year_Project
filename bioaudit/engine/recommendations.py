@@ -1,12 +1,17 @@
-"""Turn raw findings into ranked, explained, remediated findings.
+"""Turn raw findings into ranked, remediated findings.
 
-Pipeline: severity adjustment -> AI explanation/mitigation -> ranking. This is the
-bridge between the deterministic detectors and the report/dashboard.
+Pipeline: severity adjustment -> deterministic fallback mitigation -> ranking. AI
+explanation is no longer done here or anywhere on the client: it runs entirely on the
+backend (see `backend/src/services/gemini.service.js`), called through
+`ApiClient.explain_finding` once a run is saved to an account. A local explainer used
+to exist alongside it, reading a `GEMINI_API_KEY` from the machine's own environment,
+but that meant a checkbox that worked only on whichever PC happened to have that
+variable set and silently did nothing everywhere else -- the opposite of the
+one-shared-backend design the rest of the app now follows.
 """
 
 from __future__ import annotations
 
-from ..ai.explainer import Explainer
 from ..models import Finding
 from . import severity
 
@@ -34,13 +39,11 @@ _FALLBACK_MITIGATIONS = {
 }
 
 
-def process(findings: list[Finding], explainer: Explainer | None = None) -> list[Finding]:
+def process(findings: list[Finding]) -> list[Finding]:
     findings = severity.apply(findings)
 
-    if explainer and explainer.available:
-        findings = explainer.explain_all(findings)
-
-    # Ensure every finding has at least a deterministic mitigation.
+    # Ensure every finding has at least a deterministic mitigation. AI explanation, when
+    # wanted, happens later and server-side (see module docstring).
     for f in findings:
         if not f.mitigation:
             f.mitigation = _FALLBACK_MITIGATIONS.get(f.category, "See OWASP MASVS guidance for this category.")

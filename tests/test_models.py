@@ -2,7 +2,6 @@
 
 from bioaudit.models import Finding, Severity, TestRun
 from bioaudit.engine import severity
-from bioaudit.ai.redaction import redact
 
 
 def test_severity_ordering():
@@ -22,9 +21,3 @@ def test_confidence_downgrade():
     f = Finding("x", "t", Severity.HIGH, ["M3"], "e", "s", confidence="likely")
     severity.adjust_for_confidence(f)
     assert f.severity == Severity.MEDIUM
-
-
-def test_redaction_strips_secrets():
-    out = redact("token=abcdef123456 and key: AKIA1234567890ABCDEF")
-    assert "abcdef123456" not in out
-    assert "[REDACTED]" in out
