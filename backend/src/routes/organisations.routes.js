@@ -15,7 +15,12 @@
 import { Router } from "express";
 import { z } from "zod";
 
-import { FLAG_STATUS, INVITATION_STATUS, ROLES } from "../constants/index.js";
+import {
+  FLAG_STATUS,
+  INVITATION_STATUS,
+  INVITATION_TTL_DAYS,
+  ROLES,
+} from "../constants/index.js";
 import {
   loadProfile,
   requireAdmin,
@@ -24,6 +29,7 @@ import {
 } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import * as audit from "../services/audit.service.js";
+import * as email from "../services/email.service.js";
 import * as organisations from "../services/organisations.service.js";
 import * as scansService from "../services/scans.service.js";
 import * as usersService from "../services/users.service.js";
@@ -166,6 +172,18 @@ router.post(
       metadata: { email: req.body.email, role: req.body.role },
     });
 
+    // Emailed as a convenience, not as the delivery mechanism: the token is returned
+    // below regardless, so an admin can always pass it on by hand if mail is not
+    // configured or does not arrive.
+    const org = await organisations.getOrganisation(req.params.orgId);
+    const emailed = await email.sendInvitation({
+      to: invitation.email,
+      organisationName: org?.name ?? "your organisation",
+      token: invitation.token,
+      role: invitation.role,
+      expiresInDays: INVITATION_TTL_DAYS,
+    });
+
     res.status(201).json({
       invitation: {
         id: invitation.id,
@@ -175,7 +193,10 @@ router.post(
       },
       // The token is shown once. Only its hash is stored, so it cannot be shown again.
       token: invitation.token,
-      note: "Send this token to the invitee. It is not retrievable later.",
+      emailed,
+      note: emailed
+        ? "The token has been emailed to them. It is not retrievable later, so keep a copy until they have joined."
+        : "Send this token to the invitee. It is not retrievable later.",
     });
   })
 );
@@ -321,12 +342,79 @@ router.post(
   })
 );
 
+/**
+ * POST /api/organisations/:orgId/members/:uid/suspension -- Suspend or reinstate a member
+ *
+ * The reversible middle ground between removing someone from the organisation and
+ * deleting their account: a suspended member keeps everything but cannot sign in. Meant
+ * for an account under investigation, where deleting the evidence would be the wrong
+ * move and doing nothing leaves it usable.
+ */
+router.post(
+  "/:orgId/members/:uid/suspension",
+  adminOnly,
+  validate({
+    params: z.object({ orgId: z.string().min(1), uid: z.string().min(1) }),
+    body: z.object({
+      suspended: z.boolean(),
+      reason: z.string().trim().max(1000).optional(),
+    }),
+  }),
+  asyncHandler(async (req, res) => {
+    if (req.params.uid === req.user.uid) {
+      throw ApiError.badRequest("You cannot suspend your own account.");
+    }
+
+    const org = await organisations.getOrganisation(req.params.orgId);
+    if (!org.memberIds.includes(req.params.uid)) {
+      throw ApiError.notFound("That person is not a member of your organisation.");
+    }
+    if (org.ownerId === req.params.uid) {
+      throw ApiError.forbidden("The organisation owner's account cannot be suspended.");
+    }
+
+    const target = await usersService.getProfile(req.params.uid);
+    await usersService.setDisabled(req.params.uid, req.body.suspended);
+
+    await audit.record({
+      action: req.body.suspended
+        ? audit.AUDIT_ACTIONS.MEMBER_SUSPENDED
+        : audit.AUDIT_ACTIONS.MEMBER_REINSTATED,
+      actorId: req.user.uid,
+      subjectId: req.params.uid,
+      organisationId: req.params.orgId,
+      metadata: { email: target.email, reason: req.body.reason ?? null },
+    });
+
+    if (target.email) {
+      await email.sendAccountSuspended({
+        to: target.email,
+        organisationName: org.name ?? "your organisation",
+        suspended: req.body.suspended,
+      });
+    }
+
+    res.json({
+      message: req.body.suspended
+        ? "That account is suspended. They have been signed out and cannot sign in until it is lifted."
+        : "That account has been reinstated and can sign in again.",
+      suspended: req.body.suspended,
+    });
+  })
+);
+
 /** DELETE /api/organisations/:orgId/members/:uid -- Remove organisation member */
 router.delete(
   "/:orgId/members/:uid",
   adminOnly,
   validate({ params: z.object({ orgId: z.string().min(1), uid: z.string().min(1) }) }),
   asyncHandler(async (req, res) => {
+    // Read before removal, while the membership that authorises reading it still exists.
+    const [target, org] = await Promise.all([
+      usersService.getProfile(req.params.uid).catch(() => null),
+      organisations.getOrganisation(req.params.orgId).catch(() => null),
+    ]);
+
     await organisations.removeMember({
       orgId: req.params.orgId,
       uid: req.params.uid,
@@ -339,6 +427,13 @@ router.delete(
       subjectId: req.params.uid,
       organisationId: req.params.orgId,
     });
+
+    if (target?.email) {
+      await email.sendRemovedFromOrganisation({
+        to: target.email,
+        organisationName: org?.name ?? "your organisation",
+      });
+    }
 
     res.json({
       message: "Member removed from the organisation. Their account and scan history are intact.",
@@ -392,6 +487,15 @@ router.delete(
       .removeMember({ orgId: req.params.orgId, uid: req.params.uid, actorId: req.user.uid })
       .catch(() => {});
     await usersService.deleteAccount(req.params.uid);
+
+    // Sent after the fact, to the address captured above: the profile it came from no
+    // longer exists to read it from.
+    if (target.email) {
+      await email.sendAccountDeletedByAdmin({
+        to: target.email,
+        organisationName: org?.name ?? "your organisation",
+      });
+    }
 
     res.json({ message: "That account and all of its scan history have been deleted." });
   })

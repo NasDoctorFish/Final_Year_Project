@@ -83,6 +83,24 @@ export const requirePremium = asyncHandler(async (req, res, next) => {
   next();
 });
 
+/**
+ * Blocks an admin from the assessment features.
+ *
+ * An admin account is an oversight role, not a personal one: it exists to supervise a
+ * team's assessments, and giving it scanning powers of its own would put the supervisor
+ * inside the set of people being supervised. Someone who needs to do both keeps a
+ * separate personal account, which is how admin accounts were always meant to work.
+ */
+export const denyAdmin = asyncHandler(async (req, res, next) => {
+  if (req.user.role === ROLES.ADMIN) {
+    throw ApiError.forbidden(
+      "Admin accounts oversee a team's assessments rather than running their own. " +
+        "Use a personal account to scan an app."
+    );
+  }
+  next();
+});
+
 /** Gate for organisation admin features. */
 export const requireAdmin = asyncHandler(async (req, res, next) => {
   if (req.user.role !== ROLES.ADMIN) {

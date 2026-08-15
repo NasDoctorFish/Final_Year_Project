@@ -267,13 +267,16 @@ def run(cfg: Config | None = None) -> int:
 
             tabs = QTabWidget()
             tabs.setDocumentMode(True)   # flat tabs, no heavy frame around the pane
-            tabs.addTab(self._build_scan_tab(), "Scan an APK")
-            tabs.addTab(self._build_assess_tab(), "Assess a device")
+            # Indices kept because the two assessment tabs are hidden for an admin account,
+            # which oversees a team's assessments rather than running its own.
+            self._scan_tab_index = tabs.addTab(self._build_scan_tab(), "Scan an APK")
+            self._assess_tab_index = tabs.addTab(self._build_assess_tab(), "Assess a device")
             tabs.addTab(self._build_history_tab(), "History")
             # Always present, but it explains itself instead of showing empty tables when
             # the signed-in account is not an organisation admin.
             self.team_tab = team.make_team_tab(self, self.palette_colours)
             tabs.addTab(self.team_tab, "Team")
+            self.tabs = tabs
             self.setCentralWidget(tabs)
 
             # Shown on the right of the status bar so the signed-in state is always
@@ -421,6 +424,18 @@ def run(cfg: Config | None = None) -> int:
                 "Compare two saved runs to see what was fixed and what is new."
                 if signed_in and account.is_premium
                 else "Comparing runs is part of the premium plan.")
+
+            # An admin account is an oversight role: it supervises a team's assessments
+            # rather than running its own, and the server refuses a scan from one. Hiding
+            # the two tabs is what stops that becoming a rejected upload after the work of
+            # a full scan has already been done.
+            is_admin = signed_in and account.is_admin
+            for index in (self._scan_tab_index, self._assess_tab_index):
+                self.tabs.setTabVisible(index, not is_admin)
+            if is_admin and self.tabs.currentIndex() in (
+                self._scan_tab_index, self._assess_tab_index
+            ):
+                self.tabs.setCurrentIndex(self._assess_tab_index + 1)   # History
 
             self.team_tab.refresh_visibility()
             # The History tab has nothing of its own to poll on a timer, so any moment
@@ -659,6 +674,20 @@ def run(cfg: Config | None = None) -> int:
                 "Reads the app's settings and compiled code without running it. No phone needed."))
             layout.addWidget(target)
 
+            # Its own section rather than another tick box in a list, because it is a
+            # legal confirmation and not a preference. A static scan touches no live app,
+            # but the result is still an assessment of software someone owns, and the
+            # confirmation is what puts that on record before the run happens.
+            auth, al = _section("Authorisation")
+            self.scan_authorized = QCheckBox(
+                "I own this app, or I have permission to test it")
+            self.scan_authorized.setStyleSheet("font-weight: 600;")
+            al.addWidget(self.scan_authorized)
+            al.addWidget(_hint(
+                "Required. Assessing an app you do not own or have permission to test "
+                "can be an offence."))
+            layout.addWidget(auth)
+
             # --- action -----------------------------------------------
             action = QHBoxLayout()
             action.setSpacing(10)
@@ -743,6 +772,12 @@ def run(cfg: Config | None = None) -> int:
                 self.scan_apk_edit.setText(path)
 
         def _run_scan(self) -> None:
+            if not self.scan_authorized.isChecked():
+                QMessageBox.warning(
+                    self, "Authorisation required",
+                    "Confirm you own this app, or have permission to test it, before "
+                    "scanning. Tick the authorisation box first.")
+                return
             apk = self.scan_apk_edit.text().strip()
             if not apk:
                 QMessageBox.warning(self, "No APK", "Choose an APK file first.")
@@ -753,6 +788,8 @@ def run(cfg: Config | None = None) -> int:
 
             sync_result: dict = {}
             apk_name = os.path.basename(apk)
+            # Read on the main thread: the worker must not touch a widget.
+            authorised = self.scan_authorized.isChecked()
 
             def job(report) -> TestRun:
                 # Heavy work on the worker thread; the report (weasyprint/GTK) is
@@ -763,10 +800,12 @@ def run(cfg: Config | None = None) -> int:
                     should_cancel=(stop.is_set if stop else None))
                 core.process_findings(run_, on_progress=report)
                 report("Saving to your account")
-                # A static scan reads a file the user chose, so there is no live app
-                # to authorise probing against. Uploading is not optional: BioAudit keeps
-                # no local copy, so this is the only place the run ends up.
-                self._upload(run_, authorised=True, apk_file_name=apk_name,
+                # Always true by this point -- _run_scan refuses to start without the
+                # authorisation box ticked -- but recorded from the control rather than
+                # hard-coded, so the stored run reflects what the user actually confirmed.
+                # Uploading is not optional: BioAudit keeps no local copy, so this is the
+                # only place the run ends up.
+                self._upload(run_, authorised=authorised, apk_file_name=apk_name,
                              into=sync_result)
                 return run_
 

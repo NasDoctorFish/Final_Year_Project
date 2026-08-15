@@ -10,6 +10,7 @@ import { z } from "zod";
 
 import { loadProfile, requireAuth } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
+import * as email from "../services/email.service.js";
 import * as firebaseAuth from "../services/firebaseAuth.service.js";
 import * as organisations from "../services/organisations.service.js";
 import * as usersService from "../services/users.service.js";
@@ -100,6 +101,10 @@ router.post(
     await firebaseAuth.verifyPassword(req.profile.email, req.body.currentPassword);
     await usersService.changePassword(req.user.uid, req.body.newPassword);
 
+    // A password change the account owner did not make is the one they most need to hear
+    // about, so this is sent to the address on record rather than shown only on screen.
+    await email.sendPasswordChanged({ to: req.profile.email });
+
     res.json({
       message: "Password changed. All sessions have been signed out, so sign in again.",
       sessionsRevoked: true,
@@ -140,7 +145,29 @@ router.delete(
     }
 
     await firebaseAuth.verifyPassword(req.profile.email, req.body.currentPassword);
+
+    // Captured before deletion so the admin notice below can still name who left.
+    const departing = { email: req.profile.email, organisationId: req.profile.organisationId };
+
     await usersService.deleteAccount(req.user.uid);
+
+    // Informational only: an admin is told a member left for their records, but cannot
+    // block or delay a person deleting their own account.
+    if (departing.organisationId) {
+      const org = await organisations.getOrganisation(departing.organisationId).catch(() => null);
+      const admins = await usersService.listOrganisationAdmins(departing.organisationId);
+      await Promise.all(
+        admins
+          .filter((a) => a.email)
+          .map((a) =>
+            email.sendMemberLeft({
+              to: a.email,
+              memberEmail: departing.email,
+              organisationName: org?.name ?? "your organisation",
+            })
+          )
+      );
+    }
 
     res.json({ message: "Your account and all of its scan history have been deleted." });
   })

@@ -92,8 +92,28 @@ export const env = {
     },
   },
 
+  /**
+   * Outbound email. Optional in the same way the AI layer is: with no host configured
+   * the app runs normally and simply does not send, so a developer running locally is
+   * never blocked by not having SMTP credentials. Nothing in the product depends on a
+   * message arriving -- an invitation token is shown on screen as well as emailed.
+   */
+  email: {
+    host: optional("SMTP_HOST"),
+    port: int("SMTP_PORT", 587),
+    user: optional("SMTP_USER"),
+    pass: optional("SMTP_PASS"),
+    from: optional("SMTP_FROM", "BioAudit <no-reply@bioaudit.app>"),
+    get enabled() {
+      return Boolean(this.host && this.user && this.pass);
+    },
+  },
+
   limits: {
     freeHistory: int("FREE_HISTORY_LIMIT", 10),
+    // Free-tier ceiling on AI explanations per calendar month. Premium is uncapped, so
+    // there is no matching setting for it. Reflects the running cost of the Gemini API.
+    freeAiPerMonth: int("FREE_AI_MONTHLY_LIMIT", 20),
   },
 
   /**

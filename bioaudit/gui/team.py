@@ -22,6 +22,10 @@ from typing import Optional
 
 from ..api import ApiClient, ApiClientError
 
+# The Status cell's text for a blocked account. Named because it is both written into
+# the table and read back out of it to decide which way the suspend button acts.
+_SUSPENDED = "suspended"
+
 
 def make_team_tab(parent_window, palette: dict):
     """Build the Team tab. Returns the widget; it reads the client from parent_window.api."""
@@ -163,7 +167,7 @@ def make_team_tab(parent_window, palette: dict):
             layout = QVBoxLayout(w)
 
             self.members_table = _table(
-                ["Email", "Name", "Plan", "Role", "Scans"])
+                ["Email", "Name", "Plan", "Role", "Scans", "Status"])
             self.members_table.itemSelectionChanged.connect(self._member_selection_changed)
             layout.addWidget(self.members_table, 1)
 
@@ -172,18 +176,23 @@ def make_team_tab(parent_window, palette: dict):
             self.view_data_btn.clicked.connect(self._view_member_data)
             self.make_admin_btn = QPushButton("Make admin")
             self.make_admin_btn.clicked.connect(self._add_admin)
+            # Label flips to "Reinstate" when the selected member is already suspended,
+            # so one button covers both directions of a reversible action.
+            self.suspend_btn = QPushButton("Suspend")
+            self.suspend_btn.clicked.connect(self._toggle_member_suspended)
             self.remove_btn = QPushButton("Remove from team")
             self.remove_btn.clicked.connect(self._remove_member)
             self.delete_acct_btn = QPushButton("Delete their account")
             self.delete_acct_btn.clicked.connect(self._delete_member_account)
-            for b in (self.view_data_btn, self.make_admin_btn, self.remove_btn,
-                      self.delete_acct_btn):
+            for b in (self.view_data_btn, self.make_admin_btn, self.suspend_btn,
+                      self.remove_btn, self.delete_acct_btn):
                 b.setEnabled(False)
                 buttons.addWidget(b)
             buttons.addStretch(1)
             layout.addLayout(buttons)
 
             note = QLabel(
+                "Suspending blocks sign-in but keeps everything, and can be undone. "
                 "Removing someone from the team leaves their account and their runs intact. "
                 "Deleting their account cannot be undone, and is recorded in the activity log."
             )
@@ -205,6 +214,10 @@ def make_team_tab(parent_window, palette: dict):
             role = self.members_table.item(row, 3).text() if row >= 0 else ""
             self.make_admin_btn.setEnabled(enabled and role != "admin")
 
+            suspended = self.members_table.item(row, 5).text() == _SUSPENDED if row >= 0 else False
+            self.suspend_btn.setEnabled(enabled)
+            self.suspend_btn.setText("Reinstate" if suspended else "Suspend")
+
         def _load_members(self) -> None:
             members = self.client.list_members(self.org_id)
             rows, keys = [], []
@@ -215,6 +228,7 @@ def make_team_tab(parent_window, palette: dict):
                     m.get("tier", ""),
                     m.get("role", ""),
                     str(m.get("scanCount", 0)),
+                    _SUSPENDED if m.get("disabled") else "active",
                 ])
                 keys.append(m.get("id", ""))
             _fill(self.members_table, rows, keys)
@@ -360,6 +374,52 @@ def make_team_tab(parent_window, palette: dict):
             self._status(f"{email} removed from the organisation.")
             self.reload()
 
+        def _toggle_member_suspended(self) -> None:
+            """Block or restore a member's sign-in, depending on their current state."""
+            uid = _selected_key(self.members_table)
+            if not uid:
+                return
+            row = self.members_table.currentRow()
+            email = self.members_table.item(row, 0).text()
+            suspended_now = self.members_table.item(row, 5).text() == _SUSPENDED
+            suspend = not suspended_now
+
+            if suspend:
+                question = (
+                    f"Suspend {email}?\n\n"
+                    "They will be signed out immediately and cannot sign back in until you "
+                    "reinstate them. Their account and saved runs are kept, and this can be "
+                    "undone at any time."
+                )
+            else:
+                question = f"Reinstate {email}?\n\nThey will be able to sign in again."
+            if QMessageBox.question(self, "Suspend member" if suspend else "Reinstate member",
+                                    question) != QMessageBox.Yes:
+                return
+
+            reason = ""
+            if suspend:
+                # Optional, but recorded in the activity log, which is the whole point of
+                # suspending rather than quietly removing someone.
+                reason, ok = QInputDialog.getText(
+                    self, "Reason (optional)",
+                    "Recorded in the activity log:")
+                if not ok:
+                    return
+
+            try:
+                self._busy(True)
+                self.client.set_member_suspended(self.org_id, uid, suspend, reason.strip())
+            except ApiClientError as exc:
+                return self._fail(
+                    "Could not suspend that member" if suspend
+                    else "Could not reinstate that member", exc)
+            finally:
+                self._busy(False)
+
+            self._status(f"{email} {'suspended' if suspend else 'reinstated'}.")
+            self.reload()
+
         def _delete_member_account(self) -> None:
             uid = _selected_key(self.members_table)
             if not uid:
@@ -481,9 +541,18 @@ def make_team_tab(parent_window, palette: dict):
             token_dialog.setWindowTitle("Invitation created")
             token_dialog.setMinimumWidth(560)
             tl = QVBoxLayout(token_dialog)
-            label = QLabel(
+            # Emailing is best-effort on the server (it may have no mail configured), so
+            # what the admin is told to do next depends on whether it actually went out.
+            emailed = bool(created.get("emailed"))
+            sent_line = (
+                f"This token has been emailed to <b>{email}</b>. Keep a copy until they have "
+                f"joined, in case it does not arrive."
+                if emailed else
                 f"Send this token to <b>{email}</b>. They paste it into Account, then "
-                f"Join an organisation.<br><br>"
+                f"Join an organisation."
+            )
+            label = QLabel(
+                f"{sent_line}<br><br>"
                 f"<span style='color:#b00020'>This is shown once. It is stored only as a hash, "
                 f"so it cannot be retrieved later.</span>")
             label.setTextFormat(Qt.RichText)

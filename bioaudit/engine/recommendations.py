@@ -36,6 +36,21 @@ _FALLBACK_MITIGATIONS = {
                          "inputs so the response can't be used to enumerate accounts or "
                          "brute-force a token; require a signature-level permission or a "
                          "real auth check on the component, and rate-limit queries.",
+    "debuggable-release": "Remove android:debuggable from the manifest and let the build "
+                          "system set it, so release builds ship without it; a debuggable "
+                          "build lets anyone attach a debugger and step over every check.",
+    "exported-unguarded-component": "Set android:exported=\"false\" if no other app needs "
+                                    "the component, or guard it with a signature-level "
+                                    "permission; validate every Intent field it receives.",
+    "error-oracle": "Return one generic failure message for every authentication error, "
+                    "so a wrong password cannot be told apart from an unknown account; "
+                    "keep the real reason in server-side logs only.",
+    "lockout-state-leak": "Track lockout server-side and never expose the attempt count "
+                          "or locked state to an unauthenticated caller; return the same "
+                          "generic failure whether locked out or simply wrong.",
+    "lockout-improper-reset": "Hold the failed-attempt counter server-side, keyed to the "
+                              "account rather than the install, and reset it only on a "
+                              "genuine success or a server-side timeout; add backoff.",
 }
 
 

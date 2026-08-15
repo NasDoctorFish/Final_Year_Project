@@ -17,7 +17,7 @@ import { z } from "zod";
 import { db } from "../config/firebase.js";
 import { env } from "../config/env.js";
 import { COLLECTIONS, SCAN_TYPES, SEVERITIES, TIERS } from "../constants/index.js";
-import { loadProfile, requireAuth, requirePremium } from "../middleware/auth.js";
+import { denyAdmin, loadProfile, requireAuth, requirePremium } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 import * as gemini from "../services/gemini.service.js";
 import * as scansService from "../services/scans.service.js";
@@ -53,6 +53,7 @@ const findingSchema = z.object({
  */
 router.post(
   "/",
+  denyAdmin,
   validate({
     body: z.object({
       type: z.enum([SCAN_TYPES.APK, SCAN_TYPES.DEVICE]),
@@ -147,17 +148,30 @@ router.post(
     const finding = findings[req.params.findingIndex];
     if (!finding) throw ApiError.notFound("That finding does not exist in this scan.");
 
-    // Reuse a stored explanation rather than paying for the same call twice.
+    // Reuse a stored explanation rather than paying for the same call twice. Deliberately
+    // checked before the quota: re-reading an explanation you already paid for should not
+    // cost a second one.
     if (finding.explanation && finding.mitigation && !req.body.force) {
       return res.json({
         explanation: finding.explanation,
         mitigation: finding.mitigation,
         references: finding.references ?? [],
         cached: true,
+        quota: usersService.aiQuotaFor(req.profile),
       });
     }
 
-    const result = await gemini.explainFinding(finding);
+    // Spend the allowance before calling out, so a Free account that is already at its
+    // limit is refused without incurring the API cost it is not entitled to.
+    const quota = await usersService.consumeAiExplanation(req.user.uid, req.profile);
+
+    let result;
+    try {
+      result = await gemini.explainFinding(finding);
+    } catch (error) {
+      await usersService.refundAiExplanation(req.user.uid, req.profile);
+      throw error;
+    }
 
     findings[req.params.findingIndex] = {
       ...finding,
@@ -167,7 +181,7 @@ router.post(
     };
     await db.collection(COLLECTIONS.SCANS).doc(scan.id).update({ findings });
 
-    res.json({ ...result, cached: false });
+    res.json({ ...result, cached: false, quota });
   })
 );
 

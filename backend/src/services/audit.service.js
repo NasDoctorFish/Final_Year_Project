@@ -17,6 +17,8 @@ export const AUDIT_ACTIONS = {
   MEMBER_DATA_FLAGGED: "member.data_flagged",
   FLAG_REVIEWED: "flag.reviewed",
   MEMBER_ACCOUNT_DELETED: "member.account_deleted",
+  MEMBER_SUSPENDED: "member.suspended",
+  MEMBER_REINSTATED: "member.reinstated",
   ADMIN_ADDED: "admin.added",
   TIER_CHANGED: "subscription.tier_changed",
 };
