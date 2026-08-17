@@ -124,8 +124,8 @@ def run(cfg: Config | None = None) -> int:
     _require_pyside()
     _install_crash_logging()
 
-    from PySide6.QtCore import Qt
-    from PySide6.QtGui import QAction, QDesktopServices
+    from PySide6.QtCore import Qt, QRect, QSize
+    from PySide6.QtGui import QAction, QBrush, QColor, QDesktopServices, QPainter, QPen
     from PySide6.QtCore import QUrl
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QFileDialog, QFormLayout,
@@ -161,6 +161,58 @@ def run(cfg: Config | None = None) -> int:
         label.setObjectName("fieldLabel")
         return label
 
+    class ToggleSwitch(QCheckBox):
+        """A checkbox that paints itself as an on/off switch instead of a tick-box.
+
+        Reusing QCheckBox keeps the checked-state signal, Space-to-toggle, and mouse
+        handling for free; a stylesheet indicator can't draw a real sliding knob, so
+        painting is done by hand instead. Call setProperty("_palette", colours) with
+        the app's palette dict before it is shown, or it falls back to grey.
+        """
+
+        _TRACK_W, _TRACK_H = 34, 18
+
+        def hitButton(self, pos) -> bool:  # noqa: N802 - Qt override
+            return self.rect().contains(pos)
+
+        def sizeHint(self) -> QSize:
+            base = super().sizeHint()
+            width = self._TRACK_W
+            if self.text():
+                width += 8 + self.fontMetrics().horizontalAdvance(self.text()) + 2
+            return QSize(width, max(base.height(), self._TRACK_H + 8))
+
+        def paintEvent(self, event) -> None:  # noqa: N802 - Qt override
+            p = self.property("_palette") or {}
+            on, enabled = self.isChecked(), self.isEnabled()
+            if not enabled:
+                track, border, knob = p.get("disabled_bg", "#ccc"), p.get("border", "#ccc"), p.get("disabled_text", "#fff")
+            elif on:
+                track = border = p.get("primary", "#0b57d0")
+                knob = p.get("primary_text", "#ffffff")
+            else:
+                track, border, knob = p.get("surface", "#ffffff"), p.get("border_strong", "#999"), p.get("muted", "#999")
+
+            painter = QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+
+            track_rect = QRect(0, (self.height() - self._TRACK_H) // 2, self._TRACK_W, self._TRACK_H)
+            painter.setPen(QPen(QColor(border), 1))
+            painter.setBrush(QBrush(QColor(track)))
+            painter.drawRoundedRect(track_rect, self._TRACK_H / 2, self._TRACK_H / 2)
+
+            knob_d = self._TRACK_H - 4
+            knob_x = track_rect.right() - knob_d - 1 if on else track_rect.left() + 2
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(knob)))
+            painter.drawEllipse(QRect(knob_x, track_rect.top() + 2, knob_d, knob_d))
+
+            if self.text():
+                text_rect = QRect(self._TRACK_W + 8, 0, self.width() - self._TRACK_W - 8, self.height())
+                painter.setPen(QColor(p.get("text" if enabled else "disabled_text", "#000")))
+                painter.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, self.text())
+            painter.end()
+
     Worker, QThread = _make_worker_classes()
     cfg = cfg or Config.load()
 
@@ -183,6 +235,11 @@ def run(cfg: Config | None = None) -> int:
             self.cfg = cfg
             self._thread: QThread | None = None
             self._worker: Worker | None = None
+            # Separate thread pair for auto-explain, so it can run independently of a
+            # scan/assess job (e.g. after a retry-upload, with no job in flight).
+            self._explain_thread: QThread | None = None
+            self._explain_worker: Worker | None = None
+            self._explain_target: dict | None = None
             self._last_report_path: str | None = None
             self._job_ctx: dict | None = None
             # Set while a job runs so the worker thread can see a cancel request. An Event
@@ -210,13 +267,16 @@ def run(cfg: Config | None = None) -> int:
 
             tabs = QTabWidget()
             tabs.setDocumentMode(True)   # flat tabs, no heavy frame around the pane
-            tabs.addTab(self._build_scan_tab(), "Scan an APK")
-            tabs.addTab(self._build_assess_tab(), "Assess a device")
+            # Indices kept because the two assessment tabs are hidden for an admin account,
+            # which oversees a team's assessments rather than running its own.
+            self._scan_tab_index = tabs.addTab(self._build_scan_tab(), "Scan an APK")
+            self._assess_tab_index = tabs.addTab(self._build_assess_tab(), "Assess a device")
             tabs.addTab(self._build_history_tab(), "History")
             # Always present, but it explains itself instead of showing empty tables when
             # the signed-in account is not an organisation admin.
             self.team_tab = team.make_team_tab(self, self.palette_colours)
             tabs.addTab(self.team_tab, "Team")
+            self.tabs = tabs
             self.setCentralWidget(tabs)
 
             # Shown on the right of the status bar so the signed-in state is always
@@ -364,6 +424,18 @@ def run(cfg: Config | None = None) -> int:
                 "Compare two saved runs to see what was fixed and what is new."
                 if signed_in and account.is_premium
                 else "Comparing runs is part of the premium plan.")
+
+            # An admin account is an oversight role: it supervises a team's assessments
+            # rather than running its own, and the server refuses a scan from one. Hiding
+            # the two tabs is what stops that becoming a rejected upload after the work of
+            # a full scan has already been done.
+            is_admin = signed_in and account.is_admin
+            for index in (self._scan_tab_index, self._assess_tab_index):
+                self.tabs.setTabVisible(index, not is_admin)
+            if is_admin and self.tabs.currentIndex() in (
+                self._scan_tab_index, self._assess_tab_index
+            ):
+                self.tabs.setCurrentIndex(self._assess_tab_index + 1)   # History
 
             self.team_tab.refresh_visibility()
             # The History tab has nothing of its own to poll on a timer, so any moment
@@ -561,11 +633,7 @@ def run(cfg: Config | None = None) -> int:
             ctx["sync"] = sync_result
             self._last_scan_id = sync_result.get("scan_id")
             premium = bool(self.api and self.api.account and self.api.account.is_premium)
-            for explain_btn, save_btn in (
-                (self.scan_explain_btn, self.scan_save_report_btn),
-                (self.assess_explain_btn, self.assess_save_report_btn),
-            ):
-                explain_btn.setEnabled(bool(self._last_scan_id))
+            for save_btn in (self.scan_save_report_btn, self.assess_save_report_btn):
                 save_btn.setEnabled(bool(self._last_scan_id) and premium)
 
             html = _sync_banner_html(sync_result) + generator.render_html(ctx["run"])
@@ -578,6 +646,9 @@ def run(cfg: Config | None = None) -> int:
                 "Saved to your account." if sync_result.get("scan_id")
                 else f"Still not saved: {sync_result.get('error', 'unknown error')}")
             self._reload_history()
+            # After the message above, so it isn't wiped out immediately by it if the
+            # checkbox is ticked — this one keeps updating the status bar as it goes.
+            self._maybe_auto_explain(ctx)
 
         # ---- Scan APK tab ------------------------------------------------- #
 
@@ -603,6 +674,20 @@ def run(cfg: Config | None = None) -> int:
                 "Reads the app's settings and compiled code without running it. No phone needed."))
             layout.addWidget(target)
 
+            # Its own section rather than another tick box in a list, because it is a
+            # legal confirmation and not a preference. A static scan touches no live app,
+            # but the result is still an assessment of software someone owns, and the
+            # confirmation is what puts that on record before the run happens.
+            auth, al = _section("Authorisation")
+            self.scan_authorized = QCheckBox(
+                "I own this app, or I have permission to test it")
+            self.scan_authorized.setStyleSheet("font-weight: 600;")
+            al.addWidget(self.scan_authorized)
+            al.addWidget(_hint(
+                "Required. Assessing an app you do not own or have permission to test "
+                "can be an offence."))
+            layout.addWidget(auth)
+
             # --- action -----------------------------------------------
             action = QHBoxLayout()
             action.setSpacing(10)
@@ -613,14 +698,16 @@ def run(cfg: Config | None = None) -> int:
             self.scan_open_report = QPushButton("Open full report")
             self.scan_open_report.setEnabled(False)
             self.scan_open_report.clicked.connect(self._open_last_report)
-            # These two need the run to exist on the server, so they stay disabled until a
+            # Optional: once this run is saved to the account, ask the server in the
+            # background to write a plain-language explanation and fix for every finding.
+            self.scan_use_ai = ToggleSwitch("Get AI explanations")
+            self.scan_use_ai.setProperty("_palette", self.palette_colours)
+            self.scan_use_ai.setToolTip(
+                "After this run is saved, ask the server to write a plain-language "
+                "explanation and fix for every finding. Runs in the background; open "
+                "the report afterwards to read them.")
+            # This needs the run to exist on the server, so it stays disabled until a
             # run has been saved to the account.
-            self.scan_explain_btn = QPushButton("Explain findings")
-            self.scan_explain_btn.setEnabled(False)
-            self.scan_explain_btn.setToolTip(
-                "Ask the server to write a plain-language explanation and fix for every "
-                "finding. Needs the run to be saved to your account.")
-            self.scan_explain_btn.clicked.connect(self._explain_last_run)
             self.scan_save_report_btn = QPushButton("Save report from account")
             self.scan_save_report_btn.setEnabled(False)
             self.scan_save_report_btn.setToolTip(
@@ -643,7 +730,7 @@ def run(cfg: Config | None = None) -> int:
             action.addWidget(self.scan_cancel_btn)
             action.addWidget(self.scan_retry_btn)
             action.addWidget(self.scan_open_report)
-            action.addWidget(self.scan_explain_btn)
+            action.addWidget(self.scan_use_ai)
             action.addWidget(self.scan_save_report_btn)
             action.addStretch(1)
             layout.addLayout(action)
@@ -685,6 +772,12 @@ def run(cfg: Config | None = None) -> int:
                 self.scan_apk_edit.setText(path)
 
         def _run_scan(self) -> None:
+            if not self.scan_authorized.isChecked():
+                QMessageBox.warning(
+                    self, "Authorisation required",
+                    "Confirm you own this app, or have permission to test it, before "
+                    "scanning. Tick the authorisation box first.")
+                return
             apk = self.scan_apk_edit.text().strip()
             if not apk:
                 QMessageBox.warning(self, "No APK", "Choose an APK file first.")
@@ -695,6 +788,8 @@ def run(cfg: Config | None = None) -> int:
 
             sync_result: dict = {}
             apk_name = os.path.basename(apk)
+            # Read on the main thread: the worker must not touch a widget.
+            authorised = self.scan_authorized.isChecked()
 
             def job(report) -> TestRun:
                 # Heavy work on the worker thread; the report (weasyprint/GTK) is
@@ -705,10 +800,12 @@ def run(cfg: Config | None = None) -> int:
                     should_cancel=(stop.is_set if stop else None))
                 core.process_findings(run_, on_progress=report)
                 report("Saving to your account")
-                # A static scan reads a file the user chose, so there is no live app
-                # to authorise probing against. Uploading is not optional: BioAudit keeps
-                # no local copy, so this is the only place the run ends up.
-                self._upload(run_, authorised=True, apk_file_name=apk_name,
+                # Always true by this point -- _run_scan refuses to start without the
+                # authorisation box ticked -- but recorded from the control rather than
+                # hard-coded, so the stored run reflects what the user actually confirmed.
+                # Uploading is not optional: BioAudit keeps no local copy, so this is the
+                # only place the run ends up.
+                self._upload(run_, authorised=authorised, apk_file_name=apk_name,
                              into=sync_result)
                 return run_
 
@@ -716,7 +813,8 @@ def run(cfg: Config | None = None) -> int:
                             self.scan_open_report, "Starting",
                             sync_result=sync_result, summary_label=self.scan_summary,
                             stage_label=self.scan_stage, cancel_btn=self.scan_cancel_btn,
-                            retry_btn=self.scan_retry_btn, apk_file_name=apk_name)
+                            retry_btn=self.scan_retry_btn, apk_file_name=apk_name,
+                            use_ai_checkbox=self.scan_use_ai)
 
         # ---- Assess device tab -------------------------------------------- #
 
@@ -797,14 +895,16 @@ def run(cfg: Config | None = None) -> int:
             self.assess_open_report = QPushButton("Open full report")
             self.assess_open_report.setEnabled(False)
             self.assess_open_report.clicked.connect(self._open_last_report)
-            # These two need the run to exist on the server, so they stay disabled until a
+            # Optional: once this run is saved to the account, ask the server in the
+            # background to write a plain-language explanation and fix for every finding.
+            self.assess_use_ai = ToggleSwitch("Get AI explanations")
+            self.assess_use_ai.setProperty("_palette", self.palette_colours)
+            self.assess_use_ai.setToolTip(
+                "After this run is saved, ask the server to write a plain-language "
+                "explanation and fix for every finding. Runs in the background; open "
+                "the report afterwards to read them.")
+            # This needs the run to exist on the server, so it stays disabled until a
             # run has been saved to the account.
-            self.assess_explain_btn = QPushButton("Explain findings")
-            self.assess_explain_btn.setEnabled(False)
-            self.assess_explain_btn.setToolTip(
-                "Ask the server to write a plain-language explanation and fix for every "
-                "finding. Needs the run to be saved to your account.")
-            self.assess_explain_btn.clicked.connect(self._explain_last_run)
             self.assess_save_report_btn = QPushButton("Save report from account")
             self.assess_save_report_btn.setEnabled(False)
             self.assess_save_report_btn.setToolTip(
@@ -827,7 +927,7 @@ def run(cfg: Config | None = None) -> int:
             action.addWidget(self.assess_cancel_btn)
             action.addWidget(self.assess_retry_btn)
             action.addWidget(self.assess_open_report)
-            action.addWidget(self.assess_explain_btn)
+            action.addWidget(self.assess_use_ai)
             action.addWidget(self.assess_save_report_btn)
             action.addStretch(1)
             layout.addLayout(action)
@@ -870,6 +970,11 @@ def run(cfg: Config | None = None) -> int:
                 self.assess_apk_edit.setText(path)
 
         def _load_packages(self) -> None:
+            # A phone plugged in after the window opened would otherwise never be noticed:
+            # the device list is only built once, when the tab is created.
+            if not self.device_combo.isEnabled():
+                self._refresh_devices()
+
             serial = (self.device_combo.currentText().strip()
                       if self.device_combo.isEnabled() else None)
             try:
@@ -881,12 +986,29 @@ def run(cfg: Config | None = None) -> int:
                     f"Failed to list installed packages:\n{exc}\n\n"
                     "Make sure a device is connected and authorized.")
                 return
+
+            # An empty list is not an error, so it would otherwise look exactly like a
+            # successful load and leave the user clicking a button that seems dead.
+            if not pkgs:
+                QMessageBox.information(
+                    self, "No apps found",
+                    "The device reported no installed apps.\n\n"
+                    "If you are looking for a built-in app, tick \"incl. system\" — the "
+                    "list is limited to apps you installed yourself by default.")
+                self.statusBar().showMessage("No apps found on the device.")
+                return
+
             typed = self.package_combo.currentText()
             self.package_combo.clear()
             self.package_combo.addItems(pkgs)
             self.package_combo.setEditText(typed)   # keep whatever was already typed
             self.statusBar().showMessage(
-                f"Loaded {len(pkgs)} package(s) — type to filter, or pick from the list")
+                f"Loaded {len(pkgs)} app(s) — type to filter, or pick from the list")
+            # With nothing typed the combo's visible text is unchanged by the load, so
+            # without this the button looks like it did nothing at all. Showing the list
+            # is the only feedback that lands where the user is already looking.
+            if not typed.strip():
+                self.package_combo.showPopup()
 
         def _refresh_devices(self) -> None:
             self.device_combo.clear()
@@ -947,7 +1069,8 @@ def run(cfg: Config | None = None) -> int:
                             self.assess_open_report, "Starting",
                             sync_result=sync_result, summary_label=self.assess_summary,
                             stage_label=self.assess_stage, cancel_btn=self.assess_cancel_btn,
-                            retry_btn=self.assess_retry_btn, apk_file_name=apk_name)
+                            retry_btn=self.assess_retry_btn, apk_file_name=apk_name,
+                            use_ai_checkbox=self.assess_use_ai)
 
         # ---- History tab -------------------------------------------------- #
 
@@ -1194,7 +1317,7 @@ def run(cfg: Config | None = None) -> int:
         def _start_job(self, job, button, progress, results_view, open_btn, status_msg,
                        sync_result: dict | None = None, summary_label=None,
                        stage_label=None, cancel_btn=None, retry_btn=None,
-                       apk_file_name: str | None = None) -> None:
+                       apk_file_name: str | None = None, use_ai_checkbox=None) -> None:
             import threading
 
             if self._thread is not None:
@@ -1238,6 +1361,7 @@ def run(cfg: Config | None = None) -> int:
                 "cancel_btn": cancel_btn,
                 "retry_btn": retry_btn,
                 "apk_file_name": apk_file_name,
+                "use_ai_checkbox": use_ai_checkbox,
                 "run": None,
             }
 
@@ -1291,23 +1415,26 @@ def run(cfg: Config | None = None) -> int:
             self.statusBar().showMessage("Run cancelled.")
             self._cleanup_thread(ctx["button"], ctx["progress"])
 
-        def _on_job_finished(self, run_: object) -> None:
-            ctx = self._job_ctx
-            ctx["run"] = run_   # kept for the retry button, whether or not the upload worked
-            if ctx.get("stage") is not None:
-                ctx["stage"].hide()
+        def _render_run(self, ctx) -> None:
+            """Write the local report file and show it in the results view, with the
+            badges and buttons that go with it.
+
+            Shared by the normal finish path and by the AI-explain completion path
+            (success or failure), so a held-back report reveals itself looking exactly
+            like an immediately-shown one would have.
+            """
+            run_ = ctx["run"]
+            sync = ctx.get("sync") or {}
             try:
                 self._last_report_path = core.write_report(run_, self.cfg)
             except Exception as exc:  # noqa: BLE001 - findings still shown
                 self._last_report_path = None
                 _log_diag(f"write_report failed: {exc}")
                 self.statusBar().showMessage(f"Report export failed: {exc}")
-            html = generator.render_html(run_)
 
             # Prepend the sync outcome so a failed upload is visible without hiding the
             # findings, which are the point of the run.
-            sync = ctx.get("sync") or {}
-            html = _sync_banner_html(sync) + html
+            html = _sync_banner_html(sync) + generator.render_html(run_)
             if ctx.get("retry_btn") is not None:
                 ctx["retry_btn"].setVisible(bool(sync.get("error")))
                 ctx["retry_btn"].setEnabled(True)
@@ -1327,16 +1454,50 @@ def run(cfg: Config | None = None) -> int:
                 )
                 summary_label.show()
 
+        def _explain_would_start(self, ctx) -> bool:
+            """Whether _maybe_auto_explain would actually kick off a job for this ctx.
+
+            Checked ahead of the "Done" status message so _on_job_finished knows
+            whether to hold the report back, without starting the job early.
+            """
+            checkbox = (ctx or {}).get("use_ai_checkbox")
+            return bool(
+                checkbox and checkbox.isChecked()
+                and self.api and self._last_scan_id
+                and self._explain_thread is None
+            )
+
+        def _on_job_finished(self, run_: object) -> None:
+            ctx = self._job_ctx
+            ctx["run"] = run_   # kept for the retry button, whether or not the upload worked
+            if ctx.get("stage") is not None:
+                ctx["stage"].hide()
+
+            sync = ctx.get("sync") or {}
             # The server-backed actions only make sense once the run exists there.
             self._last_scan_id = sync.get("scan_id")
             premium = bool(self.api and self.api.account and self.api.account.is_premium)
-            for explain_btn, save_btn in (
-                (self.scan_explain_btn, self.scan_save_report_btn),
-                (self.assess_explain_btn, self.assess_save_report_btn),
-            ):
-                explain_btn.setEnabled(bool(self._last_scan_id))
+            for save_btn in (self.scan_save_report_btn, self.assess_save_report_btn):
                 save_btn.setEnabled(bool(self._last_scan_id) and premium)
 
+            # If AI explanations are about to be requested, hold the report back until
+            # they arrive (or give up) instead of showing it once and then changing it
+            # under the reader — see _render_run, called again from the explain handlers.
+            waiting_on_ai = self._explain_would_start(ctx)
+            if waiting_on_ai:
+                ctx["results_view"].setHtml(theme.empty_state_html(
+                    "Getting AI explanations…",
+                    [f"{run_.package} finished scanning.",
+                     "Findings are being explained by AI before the report is shown — "
+                     "this can take a little while.",
+                     "Untick \"Get AI explanations\" next time to see the report "
+                     "immediately instead."],
+                    self.palette_colours))
+                ctx["open_btn"].setEnabled(False)
+            else:
+                self._render_run(ctx)
+
+            counts = run_.counts()
             summary = ", ".join(f"{k} {v}" for k, v in counts.items() if v) or "no findings"
             status = f"Done: {run_.package} — {summary}"
             if sync.get("error"):
@@ -1345,6 +1506,10 @@ def run(cfg: Config | None = None) -> int:
                 status += "  (saved to account)"
             self.statusBar().showMessage(status)
             self._cleanup_thread(ctx["button"], ctx["progress"])
+            # After the "Done" message, so it isn't wiped out immediately by it — this
+            # one keeps updating the status bar as it goes.
+            if waiting_on_ai:
+                self._maybe_auto_explain(ctx)
 
         def _on_job_failed(self, msg: str) -> None:
             ctx = self._job_ctx
@@ -1370,50 +1535,116 @@ def run(cfg: Config | None = None) -> int:
             self._worker = None
             self._reload_history()
 
-        def _explain_last_run(self) -> None:
-            """Ask the server to explain every finding of the last saved run.
+        def _maybe_auto_explain(self, ctx) -> bool:
+            """Ask the server to explain every finding of the run just saved, if the
+            tab's "Get AI explanations" checkbox is ticked. Returns whether a job was
+            actually started, so the caller knows whether to wait for it.
 
-            Done server-side so the AI key stays on the server, and every finding's evidence
-            is stripped of secrets before it is sent. Explanations already generated are
-            reused rather than paid for twice.
+            Runs on its own worker thread, separate from the scan/assess job machinery,
+            because this fires automatically the moment a run is saved rather than from
+            a user click — freezing the window with no click to explain why would be a
+            much worse surprise than a normal button doing it. Done server-side so the
+            AI key stays on the server, and every finding's evidence is stripped of
+            secrets before it is sent. Explanations already generated are reused rather
+            than paid for twice.
+
+            The on-screen report and the local report file are both a snapshot taken the
+            moment the run finished, before any explanation exists — so once the server
+            has them, they are copied back into that same run and both views are
+            refreshed. Without this, the explanations would only ever be visible through
+            the server-backed "Save report from account" (premium-only) option.
             """
+            checkbox = (ctx or {}).get("use_ai_checkbox")
+            if checkbox is None or not checkbox.isChecked():
+                return False
             if self.api is None or not self._last_scan_id:
-                return
-            try:
-                self.setCursor(Qt.WaitCursor)
-                scan = self.api.get_scan(self._last_scan_id)
-                findings = scan.get("findings", [])
-                if not findings:
-                    QMessageBox.information(self, "Nothing to explain",
-                                            "That run has no findings.")
-                    return
+                return False
+            if self._explain_thread is not None:
+                return False  # a previous auto-explain job is still running
 
+            scan_id = self._last_scan_id
+            api = self.api
+
+            def job(_progress):
+                import time
+
+                scan = api.get_scan(scan_id)
+                findings = scan.get("findings", [])
                 explained = 0
                 failures = []
+                updates = {}    # local finding index -> {explanation, mitigation, references}
+                first = True
                 for index, finding in enumerate(findings):
                     if finding.get("explanation") and finding.get("mitigation"):
                         continue    # already has one
+                    # The free Gemini tier allows only a handful of requests per minute.
+                    # Spacing calls out keeps a multi-finding run under that ceiling instead
+                    # of bursting them back-to-back and tripping a 429.
+                    if not first:
+                        time.sleep(5)
+                    first = False
                     try:
-                        self.api.explain_finding(self._last_scan_id, index)
+                        updates[index] = api.explain_finding(scan_id, index)
                         explained += 1
                     except Exception as exc:  # noqa: BLE001 - keep going through the rest
                         failures.append(f"{finding.get('title', 'finding')}: {exc}")
-            finally:
-                self.setCursor(Qt.ArrowCursor)
+                return explained, failures, updates
+
+            # Captured now, not read back off ctx later: a new scan/assess job could
+            # start (and overwrite self._job_ctx) before this one finishes. A shallow
+            # copy is enough — the widgets it points at are the ones this run's tab
+            # already owns, and _render_run needs the same keys _on_job_finished does.
+            self._explain_target = dict(ctx)
+            self.statusBar().showMessage("Getting AI explanations…")
+            self._explain_thread = QThread()
+            self._explain_worker = Worker(job)
+            self._explain_worker.moveToThread(self._explain_thread)
+            self._explain_thread.started.connect(self._explain_worker.run)
+            self._explain_worker.finished.connect(self._on_explain_finished)
+            self._explain_worker.failed.connect(self._on_explain_failed)
+            self._explain_thread.start()
+            return True
+
+        def _on_explain_finished(self, result) -> None:
+            explained, failures, updates = result
+            target = self._explain_target or {}
+            self._cleanup_explain_thread()
+
+            run_ = target.get("run")
+            if run_ is not None:
+                for index, data in updates.items():
+                    if 0 <= index < len(run_.findings):
+                        f = run_.findings[index]
+                        f.explanation = data.get("explanation")
+                        f.mitigation = data.get("mitigation")
+                # Reveals a held-back report, or re-renders an already-shown one — either
+                # way this is the point the reader actually gets to see the result.
+                self._render_run(target)
 
             if explained == 0 and not failures:
-                QMessageBox.information(
-                    self, "Already explained",
-                    "Every finding in that run already has an explanation.")
+                self.statusBar().showMessage("No findings needed an AI explanation.")
                 return
-
-            message = f"Explained {explained} finding(s)."
+            if explained == 0 and failures:
+                self.statusBar().showMessage(f"AI explanations failed: {failures[0]}")
+                return
+            status = f"{explained} finding(s) explained by AI."
             if failures:
-                joined = chr(10).join(failures[:3])
-                message += f"{chr(10)}{chr(10)}Some could not be explained:{chr(10)}{joined}"
-            QMessageBox.information(self, "Explanations generated", message)
-            self.statusBar().showMessage(
-                f"{explained} finding(s) explained. Open the report to read them.")
+                status += f" {len(failures)} could not be explained."
+            self.statusBar().showMessage(status)
+
+        def _on_explain_failed(self, message: str) -> None:
+            target = self._explain_target or {}
+            self._cleanup_explain_thread()
+            if target.get("run") is not None:
+                self._render_run(target)   # reveal the held-back report even on failure
+            self.statusBar().showMessage(f"AI explanations unavailable: {message}")
+
+        def _cleanup_explain_thread(self) -> None:
+            if self._explain_thread is not None:
+                self._explain_thread.quit()
+                self._explain_thread.wait()
+            self._explain_thread = None
+            self._explain_worker = None
 
         def _save_server_report(self) -> None:
             """Premium. Download the report the server holds for the last saved run."""

@@ -148,6 +148,7 @@ quote database paths and configuration.
 | `loadProfile` | `req.profile` (the live Firestore user document) | you need current data, not a possibly-stale token claim |
 | `requirePremium` | — | premium-only features |
 | `requireAdmin` | — | admin-only |
+| `denyAdmin` | — | the reverse: features an admin must *not* have, i.e. running scans |
 | `requireOwnOrganisation` | — | the `:orgId` in the path must be the caller's own org |
 
 Most route files apply the common ones once at the top: `router.use(requireAuth, loadProfile)`.
@@ -376,3 +377,32 @@ from the Python engine, and `/api/health` reports `aiExplanations: disabled`.
 The key belongs **only** on the server. The Python client has no AI dependency at all — a
 local explainer existed once and was removed precisely because it only worked on whichever
 machine happened to have a key set.
+
+**Grounding.** Every prompt carries our own reviewed guidance for the finding's category
+from `services/knowledgeBase.js`, and the model is told to treat it as the authority. That
+file has one entry per detector category, and the detection engine emits a closed set — so
+**adding a detector means adding an entry here too**. An unknown category still works, it
+just falls back to an ungrounded (plainer) explanation. Revise the guidance there as MASVS
+evolves without touching the code that calls the model.
+
+**Free-tier cap.** `FREE_AI_MONTHLY_LIMIT` (default 20) is the number of explanations a
+free account may generate per calendar month; premium is uncapped. The counter lives on the
+user document as `aiUsage: { month, count }` and is spent inside a transaction, so two
+simultaneous requests cannot both take the last one. A counter from an earlier month reads
+as zero rather than needing a scheduled reset. A failed Gemini call is refunded — the API
+fails often enough (rate limits, quota) that charging for nothing would quietly eat a free
+user's month.
+
+### Email
+
+Optional, exactly like the AI layer. Set `SMTP_HOST`, `SMTP_USER` and `SMTP_PASS` to enable
+it; leave `SMTP_HOST` blank and the whole module becomes a no-op so nobody is blocked by not
+having mail credentials. For Gmail use an App Password against `smtp.gmail.com:587`.
+
+Every send is best-effort and never throws: an invitation that was created or a password
+that was changed has already succeeded, so a mail failure must not undo it.
+
+Note what email is **not** here. BioAudit's client is a desktop app, so there is no web page
+for an invite link to land on. The invitation email carries the **token**, which the
+recipient pastes into the app's join dialog — the same token the endpoint returns for the
+admin to pass on by hand. Emailing just saves that step; it is never the only route.

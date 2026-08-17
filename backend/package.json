@@ -24,6 +24,7 @@
     "firebase-admin": "^12.4.0",
     "helmet": "^7.1.0",
     "morgan": "^1.10.0",
+    "nodemailer": "^9.0.5",
     "zod": "^3.23.8"
   },
   "optionalDependencies": {

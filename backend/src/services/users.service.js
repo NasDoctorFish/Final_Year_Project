@@ -7,6 +7,7 @@
  * change to either has to update both, which is what setClaims exists for.
  */
 import { auth, db, FieldValue } from "../config/firebase.js";
+import { env } from "../config/env.js";
 import { COLLECTIONS, ROLES, SUBSCRIPTION_STATUS, TIERS } from "../constants/index.js";
 import { ApiError } from "../utils/ApiError.js";
 
@@ -168,6 +169,109 @@ export async function setDisabled(uid, disabled) {
 }
 
 /**
+ * Every admin of an organisation, for notices addressed to whoever is overseeing it.
+ *
+ * Returns an empty list rather than throwing when the query fails, because every caller
+ * so far is sending an informational message: failing to find an audience is a reason to
+ * send nothing, not a reason to fail the request that triggered it.
+ */
+export async function listOrganisationAdmins(organisationId) {
+  if (!organisationId) return [];
+  try {
+    const snap = await users()
+      .where("organisationId", "==", organisationId)
+      .where("role", "==", ROLES.ADMIN)
+      .get();
+    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  } catch {
+    return [];
+  }
+}
+
+/** The month an AI quota belongs to, as "YYYY-MM" in UTC. */
+function currentQuotaMonth() {
+  return new Date().toISOString().slice(0, 7);
+}
+
+/**
+ * Report how many AI explanations a Free account has left this month.
+ *
+ * Reads only, so the desktop app can show the remaining allowance without spending any
+ * of it. Premium is uncapped and reports a null limit rather than a large number, so a
+ * caller can tell "no limit" apart from "a big limit".
+ */
+export function aiQuotaFor(profile) {
+  if (profile.tier === TIERS.PREMIUM) {
+    return { limit: null, used: 0, remaining: null, capped: false };
+  }
+  const limit = env.limits.freeAiPerMonth;
+  // A counter left over from an earlier month has already expired, so it reads as zero
+  // rather than needing a scheduled job to reset it.
+  const used =
+    profile.aiUsage?.month === currentQuotaMonth() ? (profile.aiUsage.count ?? 0) : 0;
+  return { limit, used, remaining: Math.max(0, limit - used), capped: true };
+}
+
+/**
+ * Spend one AI explanation against a Free account's monthly allowance.
+ *
+ * The read and the write are wrapped in a transaction so two explanations requested at
+ * once cannot both see the same "one left" and take it. Premium accounts skip the
+ * transaction entirely, since there is nothing to count.
+ */
+export async function consumeAiExplanation(uid, profile) {
+  if (profile.tier === TIERS.PREMIUM) return { limit: null, used: 0, remaining: null };
+
+  const limit = env.limits.freeAiPerMonth;
+  const month = currentQuotaMonth();
+  const ref = users().doc(uid);
+
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const usage = snap.data()?.aiUsage;
+    const used = usage?.month === month ? (usage.count ?? 0) : 0;
+
+    if (used >= limit) {
+      throw ApiError.forbidden(
+        `You have used all ${limit} AI explanations included this month. ` +
+          "Upgrade to premium for unlimited explanations, or try again next month."
+      );
+    }
+
+    tx.update(ref, {
+      aiUsage: { month, count: used + 1 },
+      updatedAt: FieldValue.serverTimestamp(),
+    });
+    return { limit, used: used + 1, remaining: limit - used - 1 };
+  });
+}
+
+/**
+ * Give back an allowance spent on an explanation that never arrived.
+ *
+ * The AI service fails often enough in practice (rate limits, quota, transient 5xx) that
+ * charging for a failed call would quietly eat a Free user's month. Only refunds within
+ * the same month the charge was made, so a refund arriving after a rollover cannot push
+ * the new month's counter negative.
+ */
+export async function refundAiExplanation(uid, profile) {
+  if (profile.tier === TIERS.PREMIUM) return;
+
+  const month = currentQuotaMonth();
+  const ref = users().doc(uid);
+
+  await db
+    .runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const usage = snap.data()?.aiUsage;
+      if (usage?.month !== month || !usage.count) return;
+      tx.update(ref, { aiUsage: { month, count: Math.max(0, usage.count - 1) } });
+    })
+    // A failed refund must not replace the original error the caller is about to report.
+    .catch(() => {});
+}
+
+/**
  * Delete an account and everything belonging to it.
  *
  * Scans are removed in batches because a heavy user could have more documents than a
@@ -203,6 +307,9 @@ export function toPublicProfile(profile) {
     organisationId: profile.organisationId,
     subscription: profile.subscription,
     scanCount: profile.scanCount ?? 0,
+    // Included so a client can show the remaining allowance before spending it, rather
+    // than only finding out at the point of refusal.
+    aiQuota: aiQuotaFor(profile),
     createdAt: profile.createdAt ?? null,
   };
 }

@@ -493,6 +493,20 @@ class ApiClient:
         return self._request("DELETE",
                              f"/organisations/{org_id}/members/{uid}").get("message", "")
 
+    def set_member_suspended(self, org_id: str, uid: str, suspended: bool,
+                             reason: str = "") -> str:
+        """Admin. Block or restore a member's ability to sign in.
+
+        Reversible, unlike deleting the account: the member keeps their history and can
+        be reinstated, which is what makes it usable while something is being looked into.
+        """
+        body: dict = {"suspended": bool(suspended)}
+        if reason:
+            body["reason"] = reason
+        return self._request(
+            "POST", f"/organisations/{org_id}/members/{uid}/suspension", body=body
+        ).get("message", "")
+
     def delete_member_account(self, org_id: str, uid: str, reason: str) -> str:
         return self._request(
             "DELETE", f"/organisations/{org_id}/members/{uid}/account",
