@@ -970,6 +970,11 @@ def run(cfg: Config | None = None) -> int:
                 self.assess_apk_edit.setText(path)
 
         def _load_packages(self) -> None:
+            # A phone plugged in after the window opened would otherwise never be noticed:
+            # the device list is only built once, when the tab is created.
+            if not self.device_combo.isEnabled():
+                self._refresh_devices()
+
             serial = (self.device_combo.currentText().strip()
                       if self.device_combo.isEnabled() else None)
             try:
@@ -981,12 +986,29 @@ def run(cfg: Config | None = None) -> int:
                     f"Failed to list installed packages:\n{exc}\n\n"
                     "Make sure a device is connected and authorized.")
                 return
+
+            # An empty list is not an error, so it would otherwise look exactly like a
+            # successful load and leave the user clicking a button that seems dead.
+            if not pkgs:
+                QMessageBox.information(
+                    self, "No apps found",
+                    "The device reported no installed apps.\n\n"
+                    "If you are looking for a built-in app, tick \"incl. system\" — the "
+                    "list is limited to apps you installed yourself by default.")
+                self.statusBar().showMessage("No apps found on the device.")
+                return
+
             typed = self.package_combo.currentText()
             self.package_combo.clear()
             self.package_combo.addItems(pkgs)
             self.package_combo.setEditText(typed)   # keep whatever was already typed
             self.statusBar().showMessage(
-                f"Loaded {len(pkgs)} package(s) — type to filter, or pick from the list")
+                f"Loaded {len(pkgs)} app(s) — type to filter, or pick from the list")
+            # With nothing typed the combo's visible text is unchanged by the load, so
+            # without this the button looks like it did nothing at all. Showing the list
+            # is the only feedback that lands where the user is already looking.
+            if not typed.strip():
+                self.package_combo.showPopup()
 
         def _refresh_devices(self) -> None:
             self.device_combo.clear()
