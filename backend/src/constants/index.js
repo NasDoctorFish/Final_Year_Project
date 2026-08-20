@@ -5,6 +5,7 @@ export const COLLECTIONS = {
   ORGANISATIONS: "organisations",
   INVITATIONS: "invitations",
   SCANS: "scans",
+  REPORTS: "reports",
   FLAGS: "flags",
   AUDIT: "auditLog",
 };

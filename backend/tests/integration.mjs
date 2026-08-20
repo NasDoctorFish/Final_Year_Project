@@ -27,6 +27,7 @@ process.env.FREE_HISTORY_LIMIT = "3"; // small, so retention is quick to prove
 
 const { createApp } = await import("../src/app.js");
 const { db, auth } = await import("../src/config/firebase.js");
+const { COLLECTIONS } = await import("../src/constants/index.js");
 
 const app = createApp();
 const server = app.listen(0);
@@ -355,6 +356,33 @@ await check("exporting a report returns HTML with the findings in it", async () 
   const html = await res.text();
   assert.match(html, /com\.compare\.app/);
   assert.match(html, /CRITICAL/);
+});
+
+await check("viewing a report inline does not persist a reports document", async () => {
+  const before = await db.collection(COLLECTIONS.REPORTS).where("scanId", "==", premiumScanB).get();
+  await fetch(`${BASE}/scans/${premiumScanB}/report`, {
+    headers: { Authorization: `Bearer ${userToken}` },
+  });
+  const after = await db.collection(COLLECTIONS.REPORTS).where("scanId", "==", premiumScanB).get();
+  assert.equal(after.size, before.size, "an inline view should not create a reports document");
+});
+
+await check("downloading a report saves it to the reports collection", async () => {
+  const res = await fetch(`${BASE}/scans/${premiumScanB}/report?download=true`, {
+    headers: { Authorization: `Bearer ${userToken}` },
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-disposition") || "", /attachment/);
+
+  // The save is fire-and-forget in the route, so give it a moment to land.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  const snap = await db.collection(COLLECTIONS.REPORTS).where("scanId", "==", premiumScanB).get();
+  assert.ok(snap.size >= 1, "expected at least one saved report for this scan");
+  const doc = snap.docs[snap.docs.length - 1].data();
+  assert.equal(doc.format, "html");
+  assert.equal(doc.fileName, `bioaudit-${premiumScanB}.html`);
+  assert.match(doc.html, /com\.compare\.app/);
 });
 
 await check("cancelling the subscription drops back to free and warns about trimming", async () => {

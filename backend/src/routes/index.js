@@ -32,3 +32,11 @@ router.use("/organisations", organisationRoutes);
 router.use("/subscription", subscriptionRoutes);
 
 export default router;
+
+
+/** API Endpoint Design Updated Aug 18th by Juwon**/
+// POST /api/audits/upload-apk
+// POST /api/audits/start
+// GET  /api/audits/:scanId/status
+// GET  /api/audits/:scanId/report
+// GET  /api/audits

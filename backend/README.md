@@ -300,7 +300,8 @@ backend/
       users.service.js          accounts and custom claims
       organisations.service.js  membership, invitations, flag and review
       scans.service.js          history, retention, comparison
-      gemini.service.js         AI explanations, with redaction
+      gemini.service.js         AI explanations, with redaction (the live path)
+      aiGraph.service.js        LangGraph orchestration prototype, not wired in (see below)
       report.service.js         HTML report rendering
       audit.service.js          append-only record of admin actions
     utils/
@@ -309,6 +310,41 @@ backend/
       asyncHandler.js      forwards async errors to the error handler
   firestore.rules          deny-by-default database rules
 ```
+
+## AI orchestration prototype (not wired in)
+
+`src/services/aiGraph.service.js` is a LangGraph rebuild of the explanation layer, sitting
+next to `gemini.service.js` rather than replacing it. **No route imports it.** It exists to
+be reviewed and exercised standalone before any endpoint is switched over to it.
+
+What it adds over `gemini.service.js`: tool calls instead of one fixed prompt (the model
+asks for a finding's evidence, a scan's summary, guidance for a category, or a diff between
+two scans, rather than having everything handed to it up front), an output `responseSchema`
+per mode instead of prose-described JSON, and a one-shot repair loop for a malformed reply
+instead of a hard failure.
+
+```js
+import { createSession } from "./services/aiGraph.service.js";
+
+const session = createSession({
+  user: req.user,        // bound from the request, never model-supplied
+  scanIds: [scan.id],    // allowlist: a tool call naming any other scan is refused
+});
+
+const { result } = await session.explain(`Explain finding ${index} in scan ${scan.id}.`);
+// result: { explanation, mitigation, references } -- same shape gemini.service.js returns
+```
+
+Four modes: `explain` (one finding, matches today's endpoint), `synthesize` (a whole scan),
+`compare` (the diff between two scans, narrated), `report` (feeds a future export path).
+
+Every tool's return value passes through one egress guard before it can reach Gemini:
+redacted, capped (800 characters for evidence, 200 for labels), stripped to an explicit
+allowlist of keys. `compare_scans` drops evidence from both scans entirely — a diff needs
+categories, not two scans' worth of provider rows. This matters because a tool call's return
+is appended to the conversation and sent back to Gemini on the next turn regardless of which
+tool ran first, so the guard has to sit on every tool's output, not just the first one
+called.
 
 ## Connecting the desktop app
 

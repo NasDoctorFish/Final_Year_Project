@@ -11,6 +11,7 @@ import { env } from "../config/env.js";
 import { ApiError } from "../utils/ApiError.js";
 
 const scans = () => db.collection(COLLECTIONS.SCANS);
+const reports = () => db.collection(COLLECTIONS.REPORTS);
 
 /** Count findings by severity so the history list does not have to load every finding. */
 function countBySeverity(findings) {
@@ -123,6 +124,53 @@ export async function getScanForCaller(scanId, user) {
     throw ApiError.forbidden("You do not have access to that scan.");
   }
   return scan;
+}
+
+/** Persist an AI explanation onto the finding it belongs to. */
+export async function saveFindingExplanation(scanId, user, findingIndex, payload) {
+  const scan = await getScanForCaller(scanId, user);
+  if (scan.userId !== user.uid) {
+    throw ApiError.forbidden("You can only save explanations for your own scans.");
+  }
+
+  const findings = [...(scan.findings ?? [])];
+  const finding = findings[findingIndex];
+  if (!finding) throw ApiError.notFound("That finding does not exist in this scan.");
+
+  const saved = {
+    explanation: payload.explanation,
+    mitigation: payload.mitigation,
+    references: payload.references ?? [],
+  };
+
+  findings[findingIndex] = { ...finding, ...saved };
+  await scans().doc(scan.id).update({
+    findings,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return saved;
+}
+
+/** Record a report export (HTML/PDF) against its scan. */
+export async function saveReportExport(scanId, user, payload = {}) {
+  const scan = await getScanForCaller(scanId, user);
+  if (scan.userId !== user.uid) {
+    throw ApiError.forbidden("You can only save reports for your own scans.");
+  }
+
+  const doc = {
+    userId: user.uid,
+    organisationId: user.organisationId ?? null,
+    scanId: scan.id,
+    format: payload.format ?? "html",
+    fileName: payload.fileName ?? null,
+    html: payload.html ?? null,
+    createdAt: FieldValue.serverTimestamp(),
+  };
+
+  const ref = await reports().add(doc);
+  return { id: ref.id, ...doc };
 }
 
 export async function deleteScan(scanId, userId) {

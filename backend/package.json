@@ -28,7 +28,8 @@
     "zod": "^3.23.8"
   },
   "optionalDependencies": {
-    "@google/genai": "^0.14.0"
+    "@google/genai": "^0.14.0",
+    "@langchain/langgraph": "^1.4.12"
   },
   "devDependencies": {
     "eslint": "^9.9.0"

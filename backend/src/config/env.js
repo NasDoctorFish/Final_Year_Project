@@ -6,7 +6,9 @@
  */
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({
+  path: 'backend/.env'
+});
 
 function required(name) {
   const value = process.env[name];
@@ -34,6 +36,8 @@ const hasInlineCredentials =
   process.env.FIREBASE_PROJECT_ID &&
   process.env.FIREBASE_CLIENT_EMAIL &&
   process.env.FIREBASE_PRIVATE_KEY;
+  process.env.webApiKey=required("FIREBASE_WEB_API_KEY"),
+  process.env.storageBucket=optional("FIREBASE_STORAGE_BUCKET")
 
 /**
  * The Firebase emulators accept any caller, so credentials are neither needed nor
