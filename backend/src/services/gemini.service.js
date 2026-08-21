@@ -33,9 +33,10 @@ Reply with JSON only, in this shape:
 /** Retryable server-side conditions, as opposed to a bad request we should not repeat. */
 function isTransient(error) {
   const text = String(error?.message || "").toLowerCase();
-  return ["503", "502", "500", "429", "unavailable", "overloaded", "high demand", "timeout"].some(
-    (t) => text.includes(t)
-  );
+  return [
+    "503", "502", "500", "429", "unavailable", "overloaded", "high demand",
+    "timeout", "aborted", "abort",   // our own per-attempt deadline firing
+  ].some((t) => text.includes(t));
 }
 
 async function loadClient() {
@@ -122,6 +123,10 @@ export async function explainFinding(finding, { attempts = 3 } = {}) {
         config: {
           systemInstruction: SYSTEM_PROMPT,
           responseMimeType: "application/json",
+          // Bound each attempt. An overloaded model can otherwise leave the request
+          // open for minutes before answering, which is worse than failing: the caller
+          // has long since given up, and the retries below never get their turn.
+          abortSignal: AbortSignal.timeout(env.gemini.timeoutMs),
         },
       });
 

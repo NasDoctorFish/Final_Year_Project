@@ -86,7 +86,13 @@ export const env = {
 
   gemini: {
     apiKey: optional("GEMINI_API_KEY"),
-    model: optional("GEMINI_MODEL", "gemini-flash-latest"),
+    // A pinned model rather than a "-latest" alias. The alias is steered by Google and
+    // can land on a pool that is overloaded, which shows up as calls hanging for a
+    // minute or more before returning 503 -- far past any sensible client timeout.
+    model: optional("GEMINI_MODEL", "gemini-3.5-flash"),
+    // Ceiling on a single attempt. Without one the SDK waits indefinitely, so an
+    // overloaded model stalls the request instead of failing and letting us retry.
+    timeoutMs: int("GEMINI_TIMEOUT_MS", 20000),
     get enabled() {
       return Boolean(this.apiKey);
     },

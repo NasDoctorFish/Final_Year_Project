@@ -30,6 +30,10 @@ from ..models import Finding, TestRun
 
 DEFAULT_BASE_URL = "http://127.0.0.1:4000/api"
 DEFAULT_TIMEOUT = 30.0
+# The AI explanation endpoint alone: the server allows three attempts against the model
+# at 20s each, plus backoff, so anything near the default would give up while the server
+# was still legitimately working.
+EXPLAIN_TIMEOUT = 90.0
 
 
 class ApiClientError(RuntimeError):
@@ -157,6 +161,7 @@ class ApiClient:
 
     def _request(self, method: str, path: str, *, body: Any = None,
                  authenticated: bool = True, expect_json: bool = True,
+                 timeout: float | None = None,
                  _retried: bool = False) -> Any:
         """Send one request, refreshing an expired token once if needed."""
         if authenticated:
@@ -180,7 +185,7 @@ class ApiClient:
         request = urllib.request.Request(url, data=data, headers=headers, method=method)
 
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
                 payload = response.read().decode("utf-8", errors="replace")
                 if not expect_json:
                     return payload
@@ -206,7 +211,7 @@ class ApiClient:
                     raise AuthRequiredError(message, exc.code) from exc
                 return self._request(method, path, body=body,
                                      authenticated=authenticated,
-                                     expect_json=expect_json, _retried=True)
+                                     expect_json=expect_json, timeout=timeout, _retried=True)
 
             if exc.code == 401:
                 raise AuthRequiredError(message, exc.code, details) from exc
@@ -388,6 +393,11 @@ class ApiClient:
             "POST",
             f"/scans/{scan_id}/findings/{int(finding_index)}/explain",
             body={"force": bool(force)},
+            # Far longer than the default. This one request waits on a third-party model
+            # that the server retries up to three times, so its worst case is around a
+            # minute -- well past the timeout that suits an ordinary API call. It runs on
+            # a background thread, so waiting costs the user nothing.
+            timeout=EXPLAIN_TIMEOUT,
         )
 
     def compare_scans(self, baseline_id: str, current_id: str) -> dict:
