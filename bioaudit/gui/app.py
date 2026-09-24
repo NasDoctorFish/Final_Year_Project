@@ -129,7 +129,7 @@ def run(cfg: Config | None = None) -> int:
     from PySide6.QtCore import QUrl
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QCompleter, QFileDialog, QFormLayout,
-        QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+        QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
         QMessageBox, QProgressBar, QPushButton, QTabWidget,
         QTextBrowser, QVBoxLayout, QWidget,
     )
@@ -141,13 +141,49 @@ def run(cfg: Config | None = None) -> int:
     # something readable: it tells the user which inputs belong together and where one
     # decision ends and the next begins.
 
-    def _section(title: str):
-        """A titled card. Returns (box, inner_layout) so callers can fill it."""
+    def _section(title: str, accent: str | None = None):
+        """A titled card. Returns (box, inner_layout) so callers can fill it.
+
+        `accent` picks one of theme.TILE_ACCENTS for a coloured top edge, so a card on
+        the Scan tab, the Assess tab, and the History tab each read as visually distinct
+        rather than as identical grey boxes.
+        """
         box = QGroupBox(title)
+        if accent:
+            box.setProperty("accent", accent)
         inner = QVBoxLayout(box)
         inner.setContentsMargins(2, 6, 2, 2)
         inner.setSpacing(8)
         return box, inner
+
+    def _tile_button(accent: str, icon: str, title: str, subtitle: str) -> QPushButton:
+        """A big colourful clickable tile, Xbox-dashboard style, for the Home tab.
+
+        Built from a QPushButton with its own layout of labels rather than the button's
+        own text, because a tile needs two font sizes (a bold title, a muted subtitle)
+        that a single QPushButton label can't express.
+        """
+        btn = QPushButton()
+        btn.setProperty("tileAccent", accent)
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.setMinimumSize(220, 150)
+
+        inner = QVBoxLayout(btn)
+        inner.setContentsMargins(18, 16, 18, 16)
+        inner.setSpacing(4)
+        icon_label = QLabel(icon)
+        icon_label.setObjectName("tileIcon")
+        title_label = QLabel(title)
+        title_label.setObjectName("tileTitle")
+        title_label.setWordWrap(True)
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("tileSubtitle")
+        subtitle_label.setWordWrap(True)
+        inner.addWidget(icon_label)
+        inner.addStretch(1)
+        inner.addWidget(title_label)
+        inner.addWidget(subtitle_label)
+        return btn
 
     def _hint(text: str) -> QLabel:
         """Small muted explanatory text under a control."""
@@ -267,6 +303,7 @@ def run(cfg: Config | None = None) -> int:
 
             tabs = QTabWidget()
             tabs.setDocumentMode(True)   # flat tabs, no heavy frame around the pane
+            tabs.addTab(self._build_home_tab(), "Home")
             # Indices kept because the two assessment tabs are hidden for an admin account,
             # which oversees a team's assessments rather than running its own.
             self._scan_tab_index = tabs.addTab(self._build_scan_tab(), "Scan an APK")
@@ -432,6 +469,13 @@ def run(cfg: Config | None = None) -> int:
             is_admin = signed_in and account.is_admin
             for index in (self._scan_tab_index, self._assess_tab_index):
                 self.tabs.setTabVisible(index, not is_admin)
+            # Mirror the same gate on the Home tab: an admin oversees a team's assessments
+            # rather than running its own, so the tiles that open those tabs are removed
+            # entirely rather than left as a disabled dead end. History and Team stay put
+            # in their own grid cells (rather than stretching to fill the gap) so they
+            # keep the same size as they have for a non-admin account.
+            for tile in (self.home_scan_tile, self.home_assess_tile):
+                tile.setVisible(not is_admin)
             if is_admin and self.tabs.currentIndex() in (
                 self._scan_tab_index, self._assess_tab_index
             ):
@@ -650,6 +694,72 @@ def run(cfg: Config | None = None) -> int:
             # checkbox is ticked — this one keeps updating the status bar as it goes.
             self._maybe_auto_explain(ctx)
 
+        # ---- Home tab ------------------------------------------------------ #
+
+        def _build_home_tab(self) -> QWidget:
+            """A dashboard landing page: a hero header and a grid of coloured tiles,
+            one per feature, that jump to the tab doing the real work. Exists so first
+            launch shows something more inviting than a blank "Scan an APK" form, and so
+            related features (scan vs. assess, history vs. team) read as a set of choices
+            rather than a row of easily-missed tab labels.
+            """
+            w = QWidget()
+            layout = QVBoxLayout(w)
+            layout.setContentsMargins(24, 24, 24, 16)
+            layout.setSpacing(18)
+
+            hero = QVBoxLayout()
+            hero.setSpacing(6)
+            hero_title = QLabel("BioAudit")
+            hero_title.setObjectName("heroTitle")
+            hero_subtitle = QLabel(
+                "Android biometric authentication security testing")
+            hero_subtitle.setObjectName("heroSubtitle")
+            hero_bar = QFrame()
+            hero_bar.setObjectName("heroBar")
+            hero.addWidget(hero_title)
+            hero.addWidget(hero_subtitle)
+            hero.addSpacing(4)
+            hero.addWidget(hero_bar)
+            layout.addLayout(hero)
+
+            grid = QGridLayout()
+            grid.setSpacing(18)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+
+            self.home_scan_tile = _tile_button(
+                "scan", "\U0001F50D", "Scan an APK",
+                "Static analysis of an .apk file on disk. No device needed.")
+            self.home_scan_tile.clicked.connect(
+                lambda: self.tabs.setCurrentIndex(self._scan_tab_index))
+
+            self.home_assess_tile = _tile_button(
+                "assess", "\U0001F4F1", "Assess a device",
+                "Full runtime assessment against an installed app, over ADB.")
+            self.home_assess_tile.clicked.connect(
+                lambda: self.tabs.setCurrentIndex(self._assess_tab_index))
+
+            self.home_history_tile = _tile_button(
+                "history", "\U0001F553", "History",
+                "Browse past runs saved to your account, and compare two of them.")
+            self.home_history_tile.clicked.connect(
+                lambda: self.tabs.setCurrentIndex(self._assess_tab_index + 1))
+
+            self.home_team_tile = _tile_button(
+                "team", "\U0001F465", "Team",
+                "Admin oversight: members, invitations, flagged runs, activity.")
+            self.home_team_tile.clicked.connect(
+                lambda: self.tabs.setCurrentIndex(self._assess_tab_index + 2))
+
+            grid.addWidget(self.home_scan_tile, 0, 0)
+            grid.addWidget(self.home_assess_tile, 0, 1)
+            grid.addWidget(self.home_history_tile, 1, 0)
+            grid.addWidget(self.home_team_tile, 1, 1)
+            layout.addLayout(grid)
+            layout.addStretch(1)
+            return w
+
         # ---- Scan APK tab ------------------------------------------------- #
 
         def _build_scan_tab(self) -> QWidget:
@@ -659,7 +769,7 @@ def run(cfg: Config | None = None) -> int:
             layout.setSpacing(10)
 
             # --- target -----------------------------------------------
-            target, tl = _section("Target")
+            target, tl = _section("Target", accent="scan")
             row = QHBoxLayout()
             row.setSpacing(8)
             self.scan_apk_edit = QLineEdit()
@@ -678,7 +788,7 @@ def run(cfg: Config | None = None) -> int:
             # legal confirmation and not a preference. A static scan touches no live app,
             # but the result is still an assessment of software someone owns, and the
             # confirmation is what puts that on record before the run happens.
-            auth, al = _section("Authorisation")
+            auth, al = _section("Authorisation", accent="scan")
             self.scan_authorized = QCheckBox(
                 "I own this app, or I have permission to test it")
             self.scan_authorized.setStyleSheet("font-weight: 600;")
@@ -825,7 +935,7 @@ def run(cfg: Config | None = None) -> int:
             layout.setSpacing(10)
 
             # --- device and app ---------------------------------------
-            target, tl = _section("Device and app")
+            target, tl = _section("Device and app", accent="assess")
             form = QFormLayout()
             form.setSpacing(8)
             form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -875,7 +985,7 @@ def run(cfg: Config | None = None) -> int:
             # --- authorisation ----------------------------------------
             # Its own section rather than another tick box in a list, because it is a
             # legal confirmation and not a preference.
-            auth, al = _section("Authorisation")
+            auth, al = _section("Authorisation", accent="assess")
             self.assess_authorized = QCheckBox(
                 "I own this app, or I have permission to test it")
             self.assess_authorized.setStyleSheet("font-weight: 600;")
@@ -1080,7 +1190,7 @@ def run(cfg: Config | None = None) -> int:
             layout.setContentsMargins(16, 12, 16, 12)
             layout.setSpacing(10)
 
-            picker, pl = _section("Your saved runs")
+            picker, pl = _section("Your saved runs", accent="history")
             top = QHBoxLayout()
             top.setSpacing(8)
             self.history_combo = QComboBox()
