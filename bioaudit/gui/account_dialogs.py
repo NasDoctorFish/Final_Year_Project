@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..api import ApiClient, ApiClientError
+from .theme import DARK, ERROR_TEXT, SUCCESS_TEXT
 
 
 @dataclass
@@ -53,7 +54,7 @@ def show_profile_dialog(parent, client: ApiClient) -> DialogResult:
             account = client.account
             header = QLabel(
                 f"<b>{account.email if account else 'Unknown'}</b>"
-                f"<span style='color:#5f6672'> &nbsp;·&nbsp; "
+                f"<span style='color:{DARK['muted']}'> &nbsp;·&nbsp; "
                 f"{('team' if account.is_team else 'student') if account else '?'} account"
                 f"{' · admin' if account and account.is_admin else ''}</span>"
             )
@@ -80,7 +81,7 @@ def show_profile_dialog(parent, client: ApiClient) -> DialogResult:
 
         # --- helpers ---------------------------------------------------
         def _say(self, text: str, error: bool = False) -> None:
-            colour = "#b00020" if error else "#188038"
+            colour = ERROR_TEXT if error else SUCCESS_TEXT
             self.status.setText(f"<span style='color:{colour}'>{text}</span>")
 
         def _hint(self, text: str) -> QLabel:
@@ -214,7 +215,7 @@ def show_profile_dialog(parent, client: ApiClient) -> DialogResult:
             outer = QVBoxLayout(w)
 
             warning = QLabel(
-                "<b style='color:#b00020'>This cannot be undone.</b><br>"
+                f"<b style='color:{ERROR_TEXT}'>This cannot be undone.</b><br>"
                 "Deleting your account removes your profile and every scan saved to it on "
                 "the server. Results already saved on this computer are kept."
             )
@@ -318,13 +319,13 @@ def show_join_organisation_dialog(parent, client: ApiClient) -> DialogResult:
             token = self.token_edit.toPlainText().strip()
             if len(token) < 16:
                 self.status.setText(
-                    "<span style='color:#b00020'>That does not look like a valid token.</span>")
+                    f"<span style='color:{ERROR_TEXT}'>That does not look like a valid token.</span>")
                 return
             try:
                 self.setCursor(Qt.WaitCursor)
                 joined = client.join_organisation(token)
             except ApiClientError as exc:
-                self.status.setText(f"<span style='color:#b00020'>{exc}</span>")
+                self.status.setText(f"<span style='color:{ERROR_TEXT}'>{exc}</span>")
                 return
             finally:
                 self.setCursor(Qt.ArrowCursor)
@@ -426,7 +427,7 @@ def show_student_verification_dialog(parent, client: ApiClient) -> DialogResult:
             layout.addLayout(row)
 
         def _show(self, message: str, error: bool) -> None:
-            colour = "#b00020" if error else "#1b5e20"
+            colour = ERROR_TEXT if error else SUCCESS_TEXT
             self.status.setText(f"<span style='color:{colour}'>{message}</span>")
 
         def _resend(self) -> None:

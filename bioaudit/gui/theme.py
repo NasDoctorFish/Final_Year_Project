@@ -48,6 +48,11 @@ SEVERITY_COLOURS = {
     "info": "#475569",
 }
 
+# Status text drawn straight onto the dark surfaces: form errors, "saved" notes. The old
+# #b00020 and #1b5e20 were only 2.4:1 and 2.3:1 against the window colour.
+ERROR_TEXT = "#f87171"
+SUCCESS_TEXT = "#4ade80"
+
 # Tile and section names are kept so app.py's properties still match, but every tile now
 # shares one treatment. Four competing gradients made no colour mean anything.
 TILE_ACCENTS = {name: (DARK["primary"], DARK["primary"])

@@ -23,7 +23,7 @@ from typing import Optional
 
 from ..api import ApiClient, ApiClientError
 from .formatting import format_when
-from .theme import SEVERITY_COLOURS
+from .theme import ERROR_TEXT, SEVERITY_COLOURS
 
 # The Status cell's text for a blocked account. Named because it is both written into
 # the table and read back out of it to decide which way the suspend button acts.
@@ -672,7 +672,7 @@ def make_team_tab(parent_window, palette: dict):
             )
             label = QLabel(
                 f"{sent_line}<br><br>"
-                f"<span style='color:#b00020'>This is shown once. It is stored only as a hash, "
+                f"<span style='color:{ERROR_TEXT}'>This is shown once. It is stored only as a hash, "
                 f"so it cannot be retrieved later.</span>")
             label.setTextFormat(Qt.RichText)
             label.setWordWrap(True)

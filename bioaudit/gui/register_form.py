@@ -19,6 +19,7 @@ import time
 from typing import Optional
 
 from ..api import ApiClient, ApiClientError
+from .theme import ERROR_TEXT, SUCCESS_TEXT
 
 NOT_LISTED = "My university isn't listed"
 
@@ -261,7 +262,7 @@ def make_register_form(base_url: str):
             return None, email, uni
 
         def _show_code_status(self, message: str, error: bool) -> None:
-            colour = "#b00020" if error else "#1b5e20"
+            colour = ERROR_TEXT if error else SUCCESS_TEXT
             self.code_status.setText(f"<span style='color:{colour}'>{message}</span>")
             self.code_status.setVisible(True)
 

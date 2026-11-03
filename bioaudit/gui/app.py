@@ -77,6 +77,9 @@ def _make_worker_classes():
     return Worker, QThread
 
 
+# The job step that uploads a finished run; it cannot be cancelled.
+SAVING_STEP = "Saving to your account"
+
 _crash_log_handles: list = []   # keep the file object alive for the process lifetime
 
 
@@ -384,6 +387,32 @@ def run(cfg: Config | None = None) -> int:
 
         # ---- Shell -------------------------------------------------------- #
 
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+            """Stop a running job before the window goes.
+
+            Closing used to destroy the job's thread while it was still running, which
+            Qt answers by aborting the whole process. The job is asked to stop and its
+            thread is waited for instead, with the window already hidden so the wait
+            for the current step to end is not spent looking at a frozen window.
+            """
+            busy = [t for t in (self._thread, self._explain_thread)
+                    if t is not None and t.isRunning()]
+            if busy:
+                if QMessageBox.question(
+                    self, "A run is still going",
+                    "Stop it and close BioAudit?\n\nA run that has not started saving to "
+                    "your account is discarded.",
+                ) != QMessageBox.Yes:
+                    event.ignore()
+                    return
+                if self._cancel_event is not None:
+                    self._cancel_event.set()
+                self.hide()
+                for thread in busy:
+                    thread.quit()
+                    thread.wait()
+            event.accept()
+
         def _build_sidebar(self) -> QFrame:
             """Brand, one labelled nav item per page, and the signed-in account."""
             bar = QFrame()
@@ -591,11 +620,7 @@ def run(cfg: Config | None = None) -> int:
                 signed_in and account.needs_student_verification)
 
             # Team-only actions on the History tab.
-            self.compare_btn.setEnabled(signed_in and account.is_team)
-            self.compare_btn.setToolTip(
-                "Compare two saved runs to see what was fixed and what is new."
-                if signed_in and account.is_team
-                else "Comparing runs is for team accounts.")
+            self._update_compare_button()
             self._update_save_report_buttons()
 
             # An admin account is an oversight role: it supervises a team's assessments
@@ -698,6 +723,23 @@ def run(cfg: Config | None = None) -> int:
                     "it. You will be signed out now.")
                 # Deferred: this can run inside a sign-in flow, which should finish first.
                 QTimer.singleShot(0, self._sign_out)
+
+        def _update_compare_button(self) -> None:
+            """Comparing needs a team account and two saved runs to compare.
+
+            Called when the account changes and whenever History reloads, since a delete,
+            a clear or a new run can each move the count across two.
+            """
+            team = bool(self.api and self.api.account and self.api.account.is_team)
+            enough = len(self._history_ids) >= 2
+            self.compare_btn.setEnabled(team and enough)
+            if not team:
+                tip = "Comparing runs is for team accounts."
+            elif not enough:
+                tip = "Save at least two runs to compare them."
+            else:
+                tip = "Compare two saved runs to see what was fixed and what is new."
+            self.compare_btn.setToolTip(tip)
 
         def _update_save_report_buttons(self) -> None:
             """Single place the three "Save report from account" buttons get their state.
@@ -1215,7 +1257,10 @@ def run(cfg: Config | None = None) -> int:
                     apk, self.cfg, on_progress=report,
                     should_cancel=(stop.is_set if stop else None))
                 core.process_findings(run_, on_progress=report)
-                report("Saving to your account")
+                # Last chance to stop: once the upload starts the run is kept.
+                if stop is not None and stop.is_set():
+                    raise core.ScanCancelled("Stopped at your request.")
+                report(SAVING_STEP)
                 # Always true by this point -- _run_scan refuses to start without the
                 # authorisation box ticked -- but recorded from the control rather than
                 # hard-coded, so the stored run reflects what the user actually confirmed.
@@ -1478,7 +1523,10 @@ def run(cfg: Config | None = None) -> int:
                     package, apk, cfg, adb=adb, on_progress=report,
                     should_cancel=(stop.is_set if stop else None))
                 core.process_findings(run_, on_progress=report)
-                report("Saving to your account")
+                # Last chance to stop: once the upload starts the run is kept.
+                if stop is not None and stop.is_set():
+                    raise core.ScanCancelled("Stopped at your request.")
+                report(SAVING_STEP)
                 # The authorisation box was ticked to get here, and the server refuses a
                 # device assessment that does not carry that confirmation. Uploading is
                 # not optional: BioAudit keeps no local copy of a run.
@@ -1576,6 +1624,7 @@ def run(cfg: Config | None = None) -> int:
                     load_error = str(exc)
                     _log_diag(f"history reload failed: {load_error}")
             self.history_combo.blockSignals(False)
+            self._update_compare_button()
             if load_error:
                 self.history_results.setHtml(theme.empty_state_html(
                     "Could not load your history",
@@ -1598,7 +1647,7 @@ def run(cfg: Config | None = None) -> int:
                 scan = self.api.get_scan(self._history_ids[index])
             except Exception as exc:  # noqa: BLE001
                 self.history_results.setHtml(
-                    f"<pre style='color:#b00020; white-space:pre-wrap'>{_escape(exc)}</pre>")
+                    f"<pre style='color:{theme.ERROR_TEXT}; white-space:pre-wrap'>{_escape(exc)}</pre>")
                 return
             self.history_results.setHtml(_payload_to_html(scan))
 
@@ -1811,6 +1860,9 @@ def run(cfg: Config | None = None) -> int:
             label = ctx.get("stage")
             if label is not None:
                 label.setText(stage + "…")
+            # The upload cannot be taken back part way, so Cancel stops being offered.
+            if stage == SAVING_STEP and ctx.get("cancel_btn") is not None:
+                ctx["cancel_btn"].setEnabled(False)
             self.statusBar().showMessage(stage + "…")
 
         def _cancel_job(self) -> None:
@@ -1939,7 +1991,7 @@ def run(cfg: Config | None = None) -> int:
             if ctx.get("stage") is not None:
                 ctx["stage"].hide()
             ctx["results_view"].setHtml(
-                f"<pre style='color:#b00020; white-space:pre-wrap'>{msg}</pre>")
+                f"<pre style='color:{theme.ERROR_TEXT}; white-space:pre-wrap'>{msg}</pre>")
             self.statusBar().showMessage("Failed")
             self._cleanup_thread(ctx["button"], ctx["progress"])
 
@@ -2250,9 +2302,9 @@ def _comparison_html(comparison: dict, palette: dict) -> str:
               border-radius:10px;font-weight:700;font-size:9pt">
               {summary['unchanged']} unchanged</span>
       </p>
-      {group("Fixed since the baseline", comparison.get("resolved", []), "#188038",
+      {group("Fixed since the baseline", comparison.get("resolved", []), theme.SUCCESS_TEXT,
              "Nothing was fixed between these two runs.")}
-      {group("New in the current run", comparison.get("introduced", []), "#d93025",
+      {group("New in the current run", comparison.get("introduced", []), theme.ERROR_TEXT,
              "No new problems appeared. Good.")}
       {group("Still present", comparison.get("unchanged", []), palette["muted"],
              "Nothing carried over.")}

@@ -85,6 +85,8 @@ def build_scan_apk(apk: str, cfg: Config, on_progress=None, should_cancel=None) 
     for f in apk_analyzer.analyze_apk(apk):
         run.add(f)
 
+    # A stop asked for during the last step is honoured here, before the run is kept.
+    guard()
     return run
 
 
@@ -180,6 +182,7 @@ def build_assess(package: str, apk: str | None, cfg: Config, adb: Adb | None = N
     for f in observers.check_allow_backup(adb, package, info):
         run.add(f)
 
+    guard()
     return run
 
 

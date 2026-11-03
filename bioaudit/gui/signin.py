@@ -16,6 +16,7 @@ from typing import Optional
 from ..api import Account, ApiClient, ApiClientError
 from ..session import clear_session, forget, list_accounts, save_session, switch_to
 from .register_form import make_register_form
+from .theme import ERROR_TEXT
 
 __all__ = [
     "account_summary", "clear_session", "forget", "list_accounts", "save_session", "switch_to",
@@ -67,7 +68,7 @@ def show_signin_dialog(parent, *, base_url: str, base_dir: str | os.PathLike):
 
             self.status = QLabel("")
             self.status.setWordWrap(True)
-            self.status.setStyleSheet("color: #b00020;")
+            self.status.setStyleSheet(f"color: {ERROR_TEXT};")
             layout.addWidget(self.status)
 
             buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -202,7 +203,7 @@ def show_welcome_dialog(parent, *, base_url: str, base_dir: str | os.PathLike):
 
             self.status = QLabel("")
             self.status.setWordWrap(True)
-            self.status.setStyleSheet("color: #b00020;")
+            self.status.setStyleSheet(f"color: {ERROR_TEXT};")
             layout.addWidget(self.status)
 
             bar = QHBoxLayout()
