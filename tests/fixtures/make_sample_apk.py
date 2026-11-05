@@ -196,14 +196,15 @@ def _align(buf: bytearray, boundary: int = 4) -> None:
         buf.append(0)
 
 
-def build_dex() -> bytes:
+def build_dex(extra_strings: tuple[str, ...] = ()) -> bytes:
     # Strings must be sorted in code-point order for the string_ids table.
-    strings = sorted([
+    strings = sorted({
         "Lcom/example/vuln/BioAuth;",
         "Ljava/lang/Object;",
         "V",
         "onAuthenticationSucceeded",
-    ])
+        *extra_strings,
+    })
     s = {name: i for i, name in enumerate(strings)}
 
     # type_ids reference string indices; kept sorted by descriptor index.
