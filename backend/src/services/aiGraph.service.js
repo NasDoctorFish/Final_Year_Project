@@ -427,10 +427,12 @@ export function buildGraph({ mode, user, scanIds }) {
   const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
   /**
-   * Groq's chat-completions endpoint. Groq is OpenAI-compatible, so this reuses the same
-   * Gemini-shaped-to-OpenAI-shaped translation built for Ollama below -- only the URL,
-   * auth header, and response envelope (`choices[0].message` vs. Ollama's bare `message`)
-   * differ.
+   * Groq's chat-completions endpoint. Groq is OpenAI-compatible, which is stricter than
+   * Ollama's native API about tool calls: every assistant tool call needs an `id`, its
+   * `arguments` must be a JSON string, and each tool result must carry the `tool_call_id`
+   * it answers. So this uses its own translation (toOpenAIMessages /
+   * normalizeOpenAIMessage below) rather than Ollama's. Sending Ollama's shape here
+   * failed with `400: property 'id' is missing`.
    */
   async function callGroqCloud(systemPrompt, contents) {
     let delay = 800;
@@ -446,7 +448,7 @@ export function buildGraph({ mode, user, scanIds }) {
           signal: AbortSignal.timeout(env.groq.timeoutMs),
           body: JSON.stringify({
             model: env.groq.model,
-            messages: toOllamaMessages(systemPrompt, contents),
+            messages: toOpenAIMessages(systemPrompt, contents),
             tools: toOllamaTools(toolDeclarations),
           }),
         });
@@ -457,7 +459,7 @@ export function buildGraph({ mode, user, scanIds }) {
           throw error;
         }
         const data = await response.json();
-        return normalizeOllamaMessage(data?.choices?.[0]?.message);
+        return normalizeOpenAIMessage(data?.choices?.[0]?.message);
       } catch (error) {
         // A 429 means the account's request quota is already spent for this window --
         // retrying immediately gets the same answer every time, so it is treated as
@@ -679,6 +681,85 @@ function normalizeOllamaMessage(message) {
   const parts = [];
   for (const call of message?.tool_calls ?? []) {
     parts.push({ functionCall: { name: call.function?.name, args: call.function?.arguments ?? {} } });
+  }
+  if (message?.content) parts.push({ text: message.content });
+  return { parts, text: message?.content ?? "" };
+}
+
+/**
+ * Gemini-shaped history -> OpenAI chat-completions messages (used for Groq).
+ *
+ * Unlike Ollama's native API, an OpenAI-compatible endpoint rejects a tool call that has
+ * no `id`, arguments that are not a JSON string, and a tool result with no `tool_call_id`.
+ * Our history carries none of those, so ids are made up here (or reused if the model
+ * supplied one) and each tool result is paired with the oldest call still unanswered.
+ * That matches how toolsNode answers calls: one response per call, in call order.
+ * All the calls from one model turn go in a single assistant message, because the tool
+ * results must follow the message that made the calls.
+ */
+function toOpenAIMessages(systemPrompt, contents) {
+  const messages = [{ role: "system", content: systemPrompt }];
+  const unanswered = [];
+  let counter = 0;
+  const nextId = () => `call_${(counter += 1)}`;
+
+  for (const turn of contents) {
+    const parts = turn.parts ?? [];
+    if (turn.role === "model") {
+      const text = parts
+        .filter((p) => p.text)
+        .map((p) => p.text)
+        .join("");
+      const toolCalls = parts
+        .filter((p) => p.functionCall)
+        .map((p) => {
+          const id = p.functionCall.id || nextId();
+          unanswered.push(id);
+          return {
+            id,
+            type: "function",
+            function: {
+              name: p.functionCall.name,
+              arguments: JSON.stringify(p.functionCall.args ?? {}),
+            },
+          };
+        });
+      messages.push({
+        role: "assistant",
+        content: text,
+        ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      });
+    } else {
+      for (const part of parts) {
+        if (part.functionResponse) {
+          messages.push({
+            role: "tool",
+            tool_call_id: unanswered.shift() ?? nextId(),
+            content: JSON.stringify(part.functionResponse.response ?? {}),
+          });
+        } else if (part.text) {
+          messages.push({ role: "user", content: part.text });
+        }
+      }
+    }
+  }
+  return messages;
+}
+
+/** An OpenAI-style assistant message -> our internal { parts, text } shape. */
+function normalizeOpenAIMessage(message) {
+  const parts = [];
+  for (const call of message?.tool_calls ?? []) {
+    // The API sends arguments as a JSON string; our tools expect an object.
+    let args = call.function?.arguments ?? {};
+    if (typeof args === "string") {
+      try {
+        args = JSON.parse(args || "{}");
+      } catch {
+        args = {};
+      }
+    }
+    parts.push({ functionCall: { id: call.id, name: call.function?.name, args } });
   }
   if (message?.content) parts.push({ text: message.content });
   return { parts, text: message?.content ?? "" };
